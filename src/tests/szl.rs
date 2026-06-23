@@ -2,7 +2,7 @@
 use super::super::{
     build_szl_first_request, build_szl_next_request, parse_bcd_timestamp, SZL_REQ_LEN,
 };
-use crate::{CpuInfo, DiagnosticEntry, S7Client, S7DateTime, S7Error, Szl, SzlHeader};
+use crate::{CpuInfo, S7Client, S7DateTime, S7Error, Szl, SzlHeader};
 
 // ── read_szl guard tests ─────────────────────────────────────────────────────
 

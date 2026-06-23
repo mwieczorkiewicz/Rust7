@@ -7,7 +7,7 @@
 // in CLAUDE.md under "Integration tests".
 
 use super::common;
-use rust7::{S7_SZL_CPU_ID, S7_SZL_CPU_INFO, S7_SZL_DIAG_BUFFER};
+use rust7::{S7_SZL_CPU_ID, S7_SZL_DIAG_BUFFER};
 
 #[test]
 #[ignore = "probe: fbarresi/softplc SZL support is unverified — run manually to check"]
