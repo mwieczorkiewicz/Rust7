@@ -117,6 +117,8 @@ while !exit_request{
 |`read_szl`              |Reads a raw SZL (System Status List) block from the PLC  |
 |`read_diagnostic_buffer`|Reads and decodes the PLC diagnostic buffer               |
 |`read_cpu_info`         |Reads CPU component-identification strings                |
+|`read_work_memory`      |Reads work memory area sizes from SZL `0x0013`            |
+|`read_cycle_time`       |Reads OB1 scan cycle time statistics from SZL `0x0194`   |
 |`describe_event`        |Maps a diagnostic event ID to a human-readable description|
 
 ## Connection setup methods
@@ -539,10 +541,12 @@ SZL (System Status List / Systemzustandsliste) reads use the S7 Userdata protoco
 
 | Constant | Value | Description |
 |---|---|---|
-| `S7_SZL_CPU_ID`     | `0x0011` | Module identification (order number, firmware version, PLC type) |
-| `S7_SZL_CPU_INFO`   | `0x001C` | Component identification (module name, serial number, AS name, copyright) |
-| `S7_SZL_DIAG_BUFFER`| `0x00A0` | Diagnostic buffer — the primary diagnostic facility accessible from outside the PLC |
-| `S7_SZL_CPU_STATUS` | `0x0424` | Current CPU operating mode (RUN / STOP / STARTUP) |
+| `S7_SZL_CPU_ID`      | `0x0011` | Module identification (order number, firmware version, PLC type) |
+| `S7_SZL_WORK_MEMORY` | `0x0013` | Work memory information — total and used bytes per area |
+| `S7_SZL_CPU_INFO`    | `0x001C` | Component identification (module name, serial number, AS name, copyright) |
+| `S7_SZL_DIAG_BUFFER` | `0x00A0` | Diagnostic buffer — the primary diagnostic facility accessible from outside the PLC |
+| `S7_SZL_CYCLE_TIME`  | `0x0194` | Cycle time statistics — OB1 min, max, and current scan cycle times |
+| `S7_SZL_CPU_STATUS`  | `0x0424` | Current CPU operating mode (RUN / STOP / STARTUP) |
 
 ## SZL types
 
@@ -605,6 +609,32 @@ pub struct CpuInfo {
 }
 ```
 
+### `WorkMemoryRecord`
+
+One memory area record from SZL `0x0013`. Byte layout is from the Siemens S7 System and Standard Functions reference manual; validate with a Wireshark capture when changing CPU families.
+
+```rust
+pub struct WorkMemoryRecord {
+    pub index: u16,       // area identifier as reported by the PLC
+    pub area_type: u16,   // area type code; encoding is CPU-family specific
+    pub total_bytes: u32, // total size of this memory area in bytes
+    pub used_bytes: u32,  // currently used bytes
+}
+```
+
+### `CycleTimeInfo`
+
+Scan cycle statistics from SZL `0x0194`. All times are in milliseconds (raw PLC unit is 0.1 ms).
+
+```rust
+pub struct CycleTimeInfo {
+    pub ob1_count: u32,   // OB1 executions since last CPU startup
+    pub min_ms: f64,      // minimum scan cycle time in ms (since last startup)
+    pub max_ms: f64,      // maximum scan cycle time in ms (since last startup)
+    pub current_ms: f64,  // most recently completed scan cycle time in ms
+}
+```
+
 ### `DiagEventInfo`
 
 Returned by `describe_event()`.
@@ -662,6 +692,39 @@ pub fn read_cpu_info(&mut self) -> Result<CpuInfo, S7Error>
 
 #### Errors
 Same as `read_szl()`.
+
+---
+```rust
+pub fn read_work_memory(&mut self) -> Result<Vec<WorkMemoryRecord>, S7Error>
+```
+#### Reads work memory information from SZL `0x0013`.
+
+Returns one `WorkMemoryRecord` per memory area reported by the PLC. Typical S7-300/400 PLCs return 3 records (code, data, and retentive areas).
+
+#### Returns
+`Ok(Vec<WorkMemoryRecord>)` — one entry per memory area.
+
+#### Errors
+Same as `read_szl()`.
+
+---
+```rust
+pub fn read_cycle_time(&mut self) -> Result<CycleTimeInfo, S7Error>
+```
+#### Reads scan cycle time statistics from SZL `0x0194`.
+
+Returns a `CycleTimeInfo` with the OB1 execution count and the minimum, maximum, and most-recent cycle times in milliseconds.
+
+#### Notes
+- The PLC must be in RUN mode for meaningful data. In STOP mode all time fields may be zero.
+- `fbarresi/softplc` does not support SZL `0x0194`.
+
+#### Returns
+`Ok(CycleTimeInfo)`.
+
+#### Errors
+Same as `read_szl()`.
+Returns `S7Error::IsoInvalidTelegram` if the SZL payload is shorter than 18 bytes.
 
 ---
 ## Diagnostic event ID lookup

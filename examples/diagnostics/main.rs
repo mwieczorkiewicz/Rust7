@@ -57,6 +57,22 @@
 //!   [  3] event=0x3501  ts=2024-03-15 08:14:02.000  info=[00, 00, 00, 00]
 //!          class=Asynchronous errors  name=Cycle time exceeded
 //! ------------------------------------------------------------
+//! Reading work memory info (SZL 0x0013) ...
+//! Success!
+//! Job time (ms)  : 1.102
+//! Records        : 3
+//!   index=0x0001  area_type=0x0001  total=  524288 B  used=  131072 B
+//!   index=0x0002  area_type=0x0002  total=  524288 B  used=   65536 B
+//!   index=0x0003  area_type=0x0004  total=   65536 B  used=    4096 B
+//! ------------------------------------------------------------
+//! Reading cycle time statistics (SZL 0x0194) ...
+//! Success!
+//! Job time (ms)  : 1.044
+//! OB1 count      : 142857
+//! Current (ms)   : 7.0
+//! Min (ms)       : 6.8
+//! Max (ms)       : 12.3
+//! ------------------------------------------------------------
 //! Disconnected
 //! ```
 
@@ -164,6 +180,39 @@ fn main() {
             }
         }
         Err(e) => eprintln!("read_diagnostic_buffer failed: {}", e),
+    }
+
+    // ── 4. Work memory information (SZL 0x0013) ──────────────────────────────────
+    print_separator();
+    println!("Reading work memory info (SZL 0x0013) ...");
+    match client.read_work_memory() {
+        Ok(records) => {
+            println!("Success!");
+            println!("Job time (ms)  : {:.3}", client.last_time);
+            println!("Records        : {}", records.len());
+            for r in &records {
+                println!(
+                    "  index={:#06X}  area_type={:#06X}  total={:>10} B  used={:>10} B",
+                    r.index, r.area_type, r.total_bytes, r.used_bytes
+                );
+            }
+        }
+        Err(e) => eprintln!("read_work_memory failed: {}", e),
+    }
+
+    // ── 5. Cycle time statistics (SZL 0x0194) ────────────────────────────────────
+    print_separator();
+    println!("Reading cycle time statistics (SZL 0x0194) ...");
+    match client.read_cycle_time() {
+        Ok(ct) => {
+            println!("Success!");
+            println!("Job time (ms)  : {:.3}", client.last_time);
+            println!("OB1 count      : {}", ct.ob1_count);
+            println!("Current (ms)   : {:.1}", ct.current_ms);
+            println!("Min (ms)       : {:.1}", ct.min_ms);
+            println!("Max (ms)       : {:.1}", ct.max_ms);
+        }
+        Err(e) => eprintln!("read_cycle_time failed: {}", e),
     }
 
     print_separator();

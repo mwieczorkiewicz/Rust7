@@ -107,10 +107,10 @@ Requires the `task` CLI (https://taskfile.dev). SoftPLC image: `fbarresi/softplc
 ## Testing
 
 ```bash
-# Unit tests (123 tests, no Docker required)
+# Unit tests (132 tests, no Docker required)
 cargo test --lib
 
-# Integration tests (9 non-SZL tests + 5 SZL probe tests; requires Docker or Podman)
+# Integration tests (10 tests + 6 SZL probe tests; requires Docker or Podman)
 cargo test --test integration
 
 # Full suite (unit + doc + integration)
@@ -127,7 +127,7 @@ Integration tests live in `tests/integration/` and are wired up via `[[test]]` i
 - `tests/integration/common.rs` — `start_softplc()` (incl. socket auto-detection), `provision_db()`, `connect_client()`
 - `tests/integration/connection.rs` — connection lifecycle (connect, PDU negotiation, disconnect, reconnect)
 - `tests/integration/read_write.rs` — `read_db`, `write_db`, `read_bit`, `write_bit`, auto-chunking
-- `tests/integration/szl.rs` — SZL/diagnostic-buffer probe tests (all `#[ignore]`; fbarresi/softplc does not support ROSCTR 0x07)
+- `tests/integration/szl.rs` — SZL tests: `read_work_memory` passes against softplc; cycle-time and other SZL probes are `#[ignore]`'d (softplc returns errors for those IDs)
 
 Do not introduce new doc-test failures.
 
@@ -140,7 +140,7 @@ Do not introduce new doc-test failures.
 | File | Lines | Role |
 |---|---|---|
 | `src/lib.rs` | 11 | Crate entry. `#![forbid(unsafe_code)]`, embeds README as crate docs, re-exports public surface. Add nothing here without adding to `src/client.rs` first. |
-| `src/client.rs` | 975 | All implementation: constants, macros, `S7Error`, `S7Client`. The full protocol stack. |
+| `src/client.rs` | 1641 | All implementation: constants, macros, `S7Error`, `S7Client`. The full protocol stack. |
 | `src/diag_events.rs` | — | Diagnostic event ID lookup tables (557 entries) and `describe_event(u16) -> DiagEventInfo`. Derived from the Wireshark S7Comm dissector. |
 | `Cargo.toml` | 22 | Zero `[dependencies]`. `[lib]` points to `src/lib.rs`. `[dev-dependencies]` has testcontainers. |
 | `doc/Documentation.md` | 516 | Full API reference. Canonical source of truth for method semantics, parameters, and error codes. |
