@@ -91,11 +91,31 @@ Requires the `task` CLI (https://taskfile.dev). SoftPLC image: `fbarresi/softplc
 ## Testing
 
 ```bash
-# Run all tests (currently doc-tests only; 0 unit tests)
-cargo test
+# Unit tests (84 tests, no Docker required)
+cargo test --lib
+
+# Integration tests (9 tests, requires Docker with fbarresi/softplc image)
+DOCKER_HOST="unix://$HOME/.docker/run/docker.sock" cargo test --test integration
+
+# Full suite (unit + doc + integration)
+DOCKER_HOST="unix://$HOME/.docker/run/docker.sock" cargo test
 ```
 
-**Known pre-existing doc-test failures (4):** bare ` ``` ` blocks in doc comments that the test harness tries to compile as Rust. These are doc comment formatting bugs, not API bugs. When writing new doc comments, wrap all prose in ` ```text ` or ` ```ignore ` — never bare ` ``` `.
+### Integration tests
+
+Integration tests live in `tests/integration/` and are wired up via `[[test]]` in `Cargo.toml`. They start a fresh `fbarresi/softplc:latest-linux` container per test using [testcontainers-rs](https://rust.testcontainers.org/) (`blocking` feature), wait for `"Application started."` in container stdout, then exercise connect/read/write/bit operations over the real S7 protocol.
+
+**`DOCKER_HOST` on macOS Docker Desktop:** testcontainers-rs uses `bollard` which does not read Docker contexts. Set `DOCKER_HOST` explicitly to the Docker Desktop socket:
+```bash
+export DOCKER_HOST="unix://$HOME/.docker/run/docker.sock"
+```
+
+**Podman:** `export DOCKER_HOST="unix:///run/user/$(id -u)/podman/podman.sock"`
+
+**Test files:**
+- `tests/integration/common.rs` — `start_softplc()`, `provision_db()`, `connect_client()` helpers
+- `tests/integration/connection.rs` — connection lifecycle (connect, PDU negotiation, disconnect, reconnect)
+- `tests/integration/read_write.rs` — `read_db`, `write_db`, `read_bit`, `write_bit`, auto-chunking
 
 Do not introduce new doc-test failures.
 
@@ -109,13 +129,17 @@ Do not introduce new doc-test failures.
 |---|---|---|
 | `src/lib.rs` | 11 | Crate entry. `#![forbid(unsafe_code)]`, embeds README as crate docs, re-exports public surface. Add nothing here without adding to `src/client.rs` first. |
 | `src/client.rs` | 975 | All implementation: constants, macros, `S7Error`, `S7Client`. The full protocol stack. |
-| `Cargo.toml` | 18 | Zero `[dependencies]`. `[lib]` points to `src/lib.rs`. |
+| `Cargo.toml` | 22 | Zero `[dependencies]`. `[lib]` points to `src/lib.rs`. `[dev-dependencies]` has testcontainers. |
 | `doc/Documentation.md` | 516 | Full API reference. Canonical source of truth for method semantics, parameters, and error codes. |
 | `examples/docker/main.rs` | 187 | Standalone binary (separate crate) demonstrating read/write/bit ops against SoftPLC. |
 | `examples/docker/docker-compose.yml` | 10 | Launches SoftPLC on port 102 (S7) and 8080 (REST). |
 | `examples/docker/Taskfile.yml` | 58 | Task runner. Key tasks: `build`, `run`, `docker-up`, `docker-down`, `dev`. |
 | `examples/sdk/client.rs` | 87 | SDK reference: large read (462 bytes, auto-chunks), large write (1024 bytes), bit ops. |
 | `CHANGELOG.md` | 14 | Version history. Follow its format for new entries. |
+| `tests/integration/main.rs` | 3 | Integration test binary root (declared via `[[test]]` in Cargo.toml). |
+| `tests/integration/common.rs` | — | Shared helpers: `start_softplc()`, `provision_db()`, `connect_client()`. |
+| `tests/integration/connection.rs` | — | Connection lifecycle integration tests (4 tests). |
+| `tests/integration/read_write.rs` | — | Read/write/bit integration tests against SoftPLC (5 tests). |
 
 ### Key Files to Understand First
 
