@@ -107,7 +107,7 @@ Requires the `task` CLI (https://taskfile.dev). SoftPLC image: `fbarresi/softplc
 ## Testing
 
 ```bash
-# Unit tests (115 tests, no Docker required)
+# Unit tests (123 tests, no Docker required)
 cargo test --lib
 
 # Integration tests (9 non-SZL tests + 5 SZL probe tests; requires Docker or Podman)
@@ -141,6 +141,7 @@ Do not introduce new doc-test failures.
 |---|---|---|
 | `src/lib.rs` | 11 | Crate entry. `#![forbid(unsafe_code)]`, embeds README as crate docs, re-exports public surface. Add nothing here without adding to `src/client.rs` first. |
 | `src/client.rs` | 975 | All implementation: constants, macros, `S7Error`, `S7Client`. The full protocol stack. |
+| `src/diag_events.rs` | — | Diagnostic event ID lookup tables (557 entries) and `describe_event(u16) -> DiagEventInfo`. Derived from the Wireshark S7Comm dissector. |
 | `Cargo.toml` | 22 | Zero `[dependencies]`. `[lib]` points to `src/lib.rs`. `[dev-dependencies]` has testcontainers. |
 | `doc/Documentation.md` | 516 | Full API reference. Canonical source of truth for method semantics, parameters, and error codes. |
 | `examples/docker/main.rs` | 187 | Standalone binary (separate crate) demonstrating read/write/bit ops against SoftPLC. |
