@@ -1,0 +1,40 @@
+[
+  {
+    "label": "diagnostics: localhost",
+    "adapter": "CodeLLDB",
+    "request": "launch",
+    "build": {
+      "command": "cargo",
+      "args": ["build", "--manifest-path", "examples/diagnostics/Cargo.toml"]
+    },
+    "program": "$ZED_WORKTREE_ROOT/examples/diagnostics/target/debug/diagnostics",
+    "args": ["127.0.0.1"],
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "sourceLanguages": ["rust"]
+  },
+  {
+    "label": "diagnostics: custom PLC IP",
+    "adapter": "CodeLLDB",
+    "request": "launch",
+    "build": {
+      "command": "cargo",
+      "args": ["build", "--manifest-path", "examples/diagnostics/Cargo.toml"]
+    },
+    "program": "$ZED_WORKTREE_ROOT/examples/diagnostics/target/debug/diagnostics",
+    "args": ["192.168.0.100"],
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "sourceLanguages": ["rust"]
+  },
+  {
+    "label": "docker example: SoftPLC container (127.0.0.1)",
+    "adapter": "CodeLLDB",
+    "request": "launch",
+    "build": {
+      "command": "cargo",
+      "args": ["build", "--manifest-path", "examples/docker/Cargo.toml"]
+    },
+    "program": "$ZED_WORKTREE_ROOT/examples/docker/target/debug/docker",
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "sourceLanguages": ["rust"]
+  }
+]
