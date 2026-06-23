@@ -23,11 +23,13 @@ fn main() -> Result<(), S7Error> {
 
     client.connect_s71200_1500("192.168.0.100")?;
     println!("Connected — PDU {} bytes", client.pdu_length);
+    // Connected — PDU 480 bytes
 
     // Read 64 bytes from DB100, starting at byte 0
     let mut buf = vec![0u8; 64];
     client.read_db(100, 0, &mut buf)?;
     println!("Read {} bytes in {:.3} ms", buf.len(), client.last_time);
+    // Read 64 bytes in 1.234 ms
 
     client.disconnect();
     Ok(())
