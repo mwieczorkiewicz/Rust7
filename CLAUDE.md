@@ -71,6 +71,18 @@ Run `cargo clippy --fix` after each feature commit; if it makes changes, create 
 cargo doc --no-deps --open
 ```
 
+### Debugging in Zed
+
+A sample launch configuration lives at `.zed/debug.json.sample`. It covers three targets:
+
+| Label | Binary | Default args |
+|---|---|---|
+| `diagnostics: localhost` | `examples/diagnostics/target/debug/diagnostics` | `127.0.0.1` |
+| `diagnostics: custom PLC IP` | same | `192.168.0.100` (edit to taste) |
+| `docker example: SoftPLC container` | `examples/docker/target/debug/docker` | — |
+
+To use: copy `.zed/debug.json.sample` → `.zed/debug.json` (gitignored), then press `F4` or run `debugger: start`. Requires the **CodeLLDB** Zed extension.
+
 ### Docker Example (from `examples/docker/`)
 
 ```bash

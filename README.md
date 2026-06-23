@@ -51,6 +51,11 @@ The detailed documentation is <a href="doc/Documentation.md" target="_blank">her
 ## Examples
 For practical examples see the documentation <a href="examples/README.md" target="_blank">here</a>.
 
+## Debugging (Zed)
+A sample Zed debug configuration is provided at [`.zed/debug.json.sample`](.zed/debug.json.sample).
+Copy it to `.zed/debug.json` (gitignored) and adjust the PLC IP or adapter as needed.
+Requires the [CodeLLDB](https://github.com/vadimcn/codelldb) Zed extension.
+
 ---
 
 ## License
