@@ -378,8 +378,10 @@ impl S7Client {
     /// - `remote_tsap` : Server TSAP (PLC).
     /// 
     /// ### Notes
-    ///     The connection port used is 102 (S7Protocol Port) unless you
-    ///     changed it via set_connection_port()
+    /// ```text
+    /// The connection port used is 102 (S7Protocol Port) unless you
+    /// changed it via set_connection_port()
+    /// ```
     ///
     /// ### Returns
     /// `Ok(())` on success, or an `S7Error` on failure.
@@ -487,7 +489,9 @@ impl S7Client {
     /// After disconnection, calls to read/write will return `S7Error::NotConnected`.
     /// 
     /// ### Notes
-    ///     A Client should be disconnected on low-level error (see read_area() and write_area() suggestion)
+    /// ```text
+    /// A Client should be disconnected on low-level error (see read_area() and write_area() suggestion)
+    /// ```
     /// 
     pub fn disconnect(&mut self) {
         if self.connected {
@@ -883,11 +887,13 @@ impl S7Client {
     /// - Other reported by read_area()
     /// 
     /// ### Suggestion
-    ///   
-    ///     Even reading a single bit requires an entire telegram.
-    ///     Since reading is non-invasive, if you need to read multiple bits 
-    ///     (more or less adjacent in the same area), I recommend reading blocks 
-    ///     of bytes and then unpacking them.
+    ///
+    /// ```text
+    /// Even reading a single bit requires an entire telegram.
+    /// Since reading is non-invasive, if you need to read multiple bits
+    /// (more or less adjacent in the same area), I recommend reading blocks
+    /// of bytes and then unpacking them.
+    /// ```
     /// ---
     /// For further info, please refer to `read_area()`
     /// 
@@ -951,7 +957,9 @@ impl S7Client {
     /// - Other reported by read_area()
     /// 
     /// ### Notes
-    ///     Writing a bit affects only that bit, leaving adjacent bits in the byte unchanged. 
+    /// ```text
+    /// Writing a bit affects only that bit, leaving adjacent bits in the byte unchanged.
+    /// ```
     /// ---
     /// For further info, please refer to `write_area()`
     /// 
