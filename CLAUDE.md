@@ -94,26 +94,21 @@ Requires the `task` CLI (https://taskfile.dev). SoftPLC image: `fbarresi/softplc
 # Unit tests (84 tests, no Docker required)
 cargo test --lib
 
-# Integration tests (9 tests, requires Docker with fbarresi/softplc image)
-DOCKER_HOST="unix://$HOME/.docker/run/docker.sock" cargo test --test integration
+# Integration tests (9 tests, requires Docker or Podman)
+cargo test --test integration
 
 # Full suite (unit + doc + integration)
-DOCKER_HOST="unix://$HOME/.docker/run/docker.sock" cargo test
+cargo test
 ```
 
 ### Integration tests
 
 Integration tests live in `tests/integration/` and are wired up via `[[test]]` in `Cargo.toml`. They start a fresh `fbarresi/softplc:latest-linux` container per test using [testcontainers-rs](https://rust.testcontainers.org/) (`blocking` feature), wait for `"Application started."` in container stdout, then exercise connect/read/write/bit operations over the real S7 protocol.
 
-**`DOCKER_HOST` on macOS Docker Desktop:** testcontainers-rs uses `bollard` which does not read Docker contexts. Set `DOCKER_HOST` explicitly to the Docker Desktop socket:
-```bash
-export DOCKER_HOST="unix://$HOME/.docker/run/docker.sock"
-```
-
-**Podman:** `export DOCKER_HOST="unix:///run/user/$(id -u)/podman/podman.sock"`
+**No manual `DOCKER_HOST` needed.** `ensure_docker_host()` in `common.rs` auto-detects the socket by probing these paths in order: `$HOME/.docker/run/docker.sock` (Docker Desktop), `/var/run/docker.sock` (Linux daemon), `/run/docker.sock`, then the Podman rootless socket. It only overrides `DOCKER_HOST` if the current value is absent, empty, or not a valid URL scheme — so an explicit `DOCKER_HOST=unix://...` still takes precedence.
 
 **Test files:**
-- `tests/integration/common.rs` — `start_softplc()`, `provision_db()`, `connect_client()` helpers
+- `tests/integration/common.rs` — `start_softplc()` (incl. socket auto-detection), `provision_db()`, `connect_client()`
 - `tests/integration/connection.rs` — connection lifecycle (connect, PDU negotiation, disconnect, reconnect)
 - `tests/integration/read_write.rs` — `read_db`, `write_db`, `read_bit`, `write_bit`, auto-chunking
 
