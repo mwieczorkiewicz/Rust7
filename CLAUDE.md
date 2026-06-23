@@ -265,6 +265,18 @@ Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>
 
 ---
 
+### Keeping docs in sync
+
+After any change, update the following files to the extent the change warrants:
+
+| File | Update when… |
+|---|---|
+| `CLAUDE.md` | File map line counts change, new source files are added, test count changes, architecture or workflow changes |
+| `README.md` | Public API surface changes (new features, new types/functions visible to users), Quick Start example becomes stale |
+| `doc/Documentation.md` | Any public method, type, constant, or field is added, removed, or semantically changed — this is the canonical API reference |
+
+Rule of thumb: a `feat:` commit almost always needs `doc/Documentation.md` touched. A `refactor:` or `fix:` commit needs it only if externally observable behaviour changes.
+
 ### PR Checklist
 
 - [ ] `cargo build` passes
@@ -274,6 +286,7 @@ Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>
 - [ ] Any new `pub` item is re-exported from `src/lib.rs`
 - [ ] Any new `S7Error` variant is handled exhaustively in all match arms
 - [ ] `CHANGELOG.md` entry drafted
+- [ ] `CLAUDE.md` / `README.md` / `doc/Documentation.md` updated where applicable (see above)
 
 ---
 
