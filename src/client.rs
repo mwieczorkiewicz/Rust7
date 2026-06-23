@@ -1,25 +1,24 @@
 // Rust7 - Native Rust S7 client (Snap7‑style) for Siemens PLCs.
 // Copyright 2025 - Davide Nardella
 
-use std::net::{TcpStream, ToSocketAddrs};
-use std::net::Shutdown;
-use std::time::Duration;
 use std::fmt;
 use std::io;
 use std::io::{Read, Write};
+use std::net::Shutdown;
+use std::net::{TcpStream, ToSocketAddrs};
+use std::time::Duration;
 use std::time::Instant;
-
 
 // Connection types
 pub const CT_PG: u16 = 0x0001; // As PG (Default)
-pub const CT_OP: u16 = 0x0002; // As OP 
+pub const CT_OP: u16 = 0x0002; // As OP
 pub const CT_S7: u16 = 0x0003; // AS S7 Basic
 
 // Areas
-pub const S7_AREA_PE: u8 = 0x81;  // Process Inputs
-pub const S7_AREA_PA: u8 = 0x82;  // Process Outputs
-pub const S7_AREA_MK: u8 = 0x83;  // Merkers
-pub const S7_AREA_DB: u8 = 0x84;  // Data Block
+pub const S7_AREA_PE: u8 = 0x81; // Process Inputs
+pub const S7_AREA_PA: u8 = 0x82; // Process Outputs
+pub const S7_AREA_MK: u8 = 0x83; // Merkers
+pub const S7_AREA_DB: u8 = 0x84; // Data Block
 
 // Wordlen
 pub const S7_WL_BIT: u8 = 0x01;
@@ -30,56 +29,55 @@ const TS_RES_BIT: u8 = 0x03;
 const TS_RES_BYTE: u8 = 0x04;
 
 // PDU related
-const TPKT_ISO_LEN: usize   = 7; // ISO Header length
-const PDU_LEN_REQ: u16      = 480; // PDU Length requested for negotiation
-const ISO_CR_LEN: usize     = 22;   // Connection request telegram size 
-const ISO_CONN_REQ: u8      = 0xE0; // ISO connection requesr
-const ISO_CONN_OK: u8       = 0xD0; // ISO connection accepted
-const ISO_PN_REQ_LEN: usize = 25;   // PDU negotiation request telegram size 
-const ISO_PN_RES_LEN: usize = 27;   // PDU negotiation response telegram size 
-const ISO_ID: u8            = 0x03; // RFC 1006 ID
-const S7_ID: u8             = 0x32; // S7 Protocol ID
+const TPKT_ISO_LEN: usize = 7; // ISO Header length
+const PDU_LEN_REQ: u16 = 480; // PDU Length requested for negotiation
+const ISO_CR_LEN: usize = 22; // Connection request telegram size
+const ISO_CONN_REQ: u8 = 0xE0; // ISO connection requesr
+const ISO_CONN_OK: u8 = 0xD0; // ISO connection accepted
+const ISO_PN_REQ_LEN: usize = 25; // PDU negotiation request telegram size
+const ISO_PN_RES_LEN: usize = 27; // PDU negotiation response telegram size
+const ISO_ID: u8 = 0x03; // RFC 1006 ID
+const S7_ID: u8 = 0x32; // S7 Protocol ID
 
+const READ_REQ_LEN: usize = 31; // TKPT + ISO + S7 headers
+const READ_RES_LEN: usize = 18; // Read job response header length
+const WRITE_RES_LEN: usize = 15; // Write job response header length
 
-const READ_REQ_LEN: usize   = 31; // TKPT + ISO + S7 headers
-const READ_RES_LEN: usize   = 18; // Read job response header length
-const WRITE_RES_LEN: usize  = 15; // Write job response header length
-
-const EOT: u8               = 0x80; // ISO End of Trasmission
-const RW_RES_OFFSET: usize  = 14;
+const EOT: u8 = 0x80; // ISO End of Trasmission
+const RW_RES_OFFSET: usize = 14;
 
 /// Operation successful
-const RES_SUCCESS: u8         = 0xFF;
+const RES_SUCCESS: u8 = 0xFF;
 /// Invalid Address requested
 /// - Trying to read beyond the limits
 /// - The DB is optimizad
 const RES_INVALID_ADDRESS: u8 = 0x05;
 /// Resource not found
 /// - The DB doesn't exists in the CPU
-const RES_NOT_FOUND: u8       = 0x0A;
+const RES_NOT_FOUND: u8 = 0x0A;
 
 // SZL (System Status List) IDs
 /// Module identification (order number, firmware version, PLC type).
-pub const S7_SZL_CPU_ID: u16      = 0x0011;
+pub const S7_SZL_CPU_ID: u16 = 0x0011;
 /// Component identification (module name, serial number, AS name, copyright).
-pub const S7_SZL_CPU_INFO: u16    = 0x001C;
+pub const S7_SZL_CPU_INFO: u16 = 0x001C;
 /// Diagnostic buffer — the primary diagnostic facility accessible from outside the PLC.
 pub const S7_SZL_DIAG_BUFFER: u16 = 0x00A0;
 /// Current CPU operating mode (RUN / STOP / STARTUP).
-pub const S7_SZL_CPU_STATUS: u16  = 0x0424;
+pub const S7_SZL_CPU_STATUS: u16 = 0x0424;
 
 // SZL protocol internals
-const SZL_REQ_LEN: usize         = 33;  // SZL request telegram size (bytes)
-// Offsets within the S7 userdata **response** body (after the 7-byte TPKT/COTP header).
-// S7 userdata response header: 12 bytes (10-byte base + 2 error-class/code bytes).
-// Parameter block: 10 bytes starting at response[12].
-// Data block: starts at response[22].
-// Verified against moka7 / Snap7 (PDU[N] = response[N-7]).
+const SZL_REQ_LEN: usize = 33; // SZL request telegram size (bytes)
+                               // Offsets within the S7 userdata **response** body (after the 7-byte TPKT/COTP header).
+                               // S7 userdata response header: 12 bytes (10-byte base + 2 error-class/code bytes).
+                               // Parameter block: 10 bytes starting at response[12].
+                               // Data block: starts at response[22].
+                               // Verified against moka7 / Snap7 (PDU[N] = response[N-7]).
 const SZL_SEQ_DONE_OFFSET: usize = 19; // last param byte: 0x00 = final/only fragment
 const SZL_DATA_RET_OFFSET: usize = 22; // data-block return code (0xFF = ok)
 const SZL_DATA_LEN_OFFSET: usize = 24; // data-block payload length (2 bytes, big-endian)
-const SZL_PAYLOAD_OFFSET: usize  = 26; // start of SZL payload within the data block
-const SZL_MAX_ITER: usize        = 100; // safety cap on the fragment-accumulation loop
+const SZL_PAYLOAD_OFFSET: usize = 26; // start of SZL payload within the data block
+const SZL_MAX_ITER: usize = 100; // safety cap on the fragment-accumulation loop
 
 // Macros
 macro_rules! hi_part {
@@ -218,83 +216,101 @@ pub struct S7Client {
     max_rd_pdu_data: u16, // Max Read PDU Payload
     max_wr_pdu_data: u16, // Max Write PDU Payload
     /// PDU length negotiated by the CPU
-    pub pdu_length: u16,  
+    pub pdu_length: u16,
     /// Client connected
     pub connected: bool,
     /// ### Last Job time (ms).
-    /// 
+    ///
     /// If an error occurred the value will be 0
     pub last_time: f64,
     /// ### Indicates how many pieces the data to be read or written in the last operation was divided into
     /// Maybe you need to know it only for extreme tuning
-    pub chunks:  usize,
+    pub chunks: usize,
 }
 
-    /// ### Checks the incoming ISO Packet coherence
-    ///
-    /// Typically, a PLC never sends incorrect values, but we may find data in the buffer 
-    /// from a fragmented transmission, so it is good practice to check.
-    /// 
-    fn check_iso_packet(pdu_length: u16, iso_packet: &mut [u8; TPKT_ISO_LEN]) -> Result<usize, S7Error> {
-        //
-        //  TPKT + ISO Header
-        // 
-        //  TPKT
-        //      [0]    RFC 1006 ID          0x03
-        //      [1]    Reserved             0x00
-        //      [2]    HI Telegram length   Variable
-        //      [3]    LO Telegram length   Variable
-        //  ISO
-        //      [4]    Length               0x02
-        //      [5]    PDU Type             0xF0
-        //      [6]    EOT                  0x80
+/// ### Checks the incoming ISO Packet coherence
+///
+/// Typically, a PLC never sends incorrect values, but we may find data in the buffer
+/// from a fragmented transmission, so it is good practice to check.
+///
+fn check_iso_packet(
+    pdu_length: u16,
+    iso_packet: &mut [u8; TPKT_ISO_LEN],
+) -> Result<usize, S7Error> {
+    //
+    //  TPKT + ISO Header
+    //
+    //  TPKT
+    //      [0]    RFC 1006 ID          0x03
+    //      [1]    Reserved             0x00
+    //      [2]    HI Telegram length   Variable
+    //      [3]    LO Telegram length   Variable
+    //  ISO
+    //      [4]    Length               0x02
+    //      [5]    PDU Type             0xF0
+    //      [6]    EOT                  0x80
 
-        // Check Telegram validity
-        
-        if iso_packet[0] != ISO_ID || iso_packet[4] != 0x02 || iso_packet[5] != 0xF0 {
-            return Err(S7Error::IsoInvalidHeader);
-        }
-        
-        if iso_packet[6] != EOT {
-            return Err(S7Error::IsoFragmentedPacket);
-        }
-        
-        let telegram_length: usize = make_u16!(iso_packet[2], iso_packet[3]) as usize;
-        
-        if telegram_length < TPKT_ISO_LEN || 
-           telegram_length - TPKT_ISO_LEN > pdu_length as usize || 
-           telegram_length - TPKT_ISO_LEN == 0 {
-            return Err(S7Error::IsoInvalidTelegram);
-        }  
-        
-        // Returns the ramaining byte to read from the telegram
-        Ok(telegram_length - TPKT_ISO_LEN)
+    // Check Telegram validity
+
+    if iso_packet[0] != ISO_ID || iso_packet[4] != 0x02 || iso_packet[5] != 0xF0 {
+        return Err(S7Error::IsoInvalidHeader);
     }
+
+    if iso_packet[6] != EOT {
+        return Err(S7Error::IsoFragmentedPacket);
+    }
+
+    let telegram_length: usize = make_u16!(iso_packet[2], iso_packet[3]) as usize;
+
+    if telegram_length < TPKT_ISO_LEN
+        || telegram_length - TPKT_ISO_LEN > pdu_length as usize
+        || telegram_length - TPKT_ISO_LEN == 0
+    {
+        return Err(S7Error::IsoInvalidTelegram);
+    }
+
+    // Returns the ramaining byte to read from the telegram
+    Ok(telegram_length - TPKT_ISO_LEN)
+}
 
 // Builds the 33-byte ROSCTR-0x07 Userdata "first" SZL read request telegram.
 fn build_szl_first_request(szl_id: u16, szl_index: u16) -> [u8; SZL_REQ_LEN] {
     let mut req: [u8; SZL_REQ_LEN] = [
-        ISO_ID, 0x00,            // TPKT: version, reserved              0
-        0x00, 0x21,              // TPKT: total length = 33              2
-        0x02, 0xF0, EOT,         // COTP: len, PDU type, EOT             4
-        S7_ID, 0x07,             // S7: protocol ID, ROSCTR = Userdata   7
-        0x00, 0x00,              // redundancy id                        9
-        0x11, 0x00,              // PDU reference                        11
-        0x00, 0x08,              // parameter length = 8                 13
-        0x00, 0x08,              // data length = 8                      15
+        ISO_ID,
+        0x00, // TPKT: version, reserved              0
+        0x00,
+        0x21, // TPKT: total length = 33              2
+        0x02,
+        0xF0,
+        EOT, // COTP: len, PDU type, EOT             4
+        S7_ID,
+        0x07, // S7: protocol ID, ROSCTR = Userdata   7
+        0x00,
+        0x00, // redundancy id                        9
+        0x11,
+        0x00, // PDU reference                        11
+        0x00,
+        0x08, // parameter length = 8                 13
+        0x00,
+        0x08, // data length = 8                      15
         // --- Parameter block (8 bytes at 17–24) ---
-        0x00, 0x01, 0x12,        // param header                         17
-        0x04,                    // sub-length = 4                       20
-        0x11,                    // method = request                     21
-        0x44,                    // type=4(req) | group=4(CPU)           22
-        0x01,                    // subfunction = ReadSZL                23
-        0x00,                    // sequence number = 0 (first)          24
+        0x00,
+        0x01,
+        0x12, // param header                         17
+        0x04, // sub-length = 4                       20
+        0x11, // method = request                     21
+        0x44, // type=4(req) | group=4(CPU)           22
+        0x01, // subfunction = ReadSZL                23
+        0x00, // sequence number = 0 (first)          24
         // --- Data block (8 bytes at 25–32) ---
-        RES_SUCCESS,             // data return code                     25
-        0x09,                    // transport size = OCTET_STRING        26
-        0x00, 0x04,              // data payload length = 4              27
-        0x00, 0x00,              // SZL-ID (filled below)                29
-        0x00, 0x00,              // SZL-INDEX (filled below)             31
+        RES_SUCCESS, // data return code                     25
+        0x09,        // transport size = OCTET_STRING        26
+        0x00,
+        0x04, // data payload length = 4              27
+        0x00,
+        0x00, // SZL-ID (filled below)                29
+        0x00,
+        0x00, // SZL-INDEX (filled below)             31
     ];
     req[29] = hi_part!(szl_id);
     req[30] = lo_part!(szl_id);
@@ -307,21 +323,21 @@ fn build_szl_first_request(szl_id: u16, szl_index: u16) -> [u8; SZL_REQ_LEN] {
 // `seq_num` must echo the sequence number the PLC returned in the previous response.
 fn build_szl_next_request(seq_num: u8) -> [u8; SZL_REQ_LEN] {
     [
-        ISO_ID, 0x00,            // TPKT: version, reserved              0
-        0x00, 0x21,              // TPKT: total length = 33              2
-        0x02, 0xF0, EOT,         // COTP                                 4
-        S7_ID, 0x07,             // S7: protocol ID, ROSCTR = Userdata   7
-        0x00, 0x00,              // redundancy id                        9
-        0x12, 0x00,              // PDU reference                        11
-        0x00, 0x0C,              // parameter length = 12                13
-        0x00, 0x04,              // data length = 4                      15
+        ISO_ID, 0x00, // TPKT: version, reserved              0
+        0x00, 0x21, // TPKT: total length = 33              2
+        0x02, 0xF0, EOT, // COTP                                 4
+        S7_ID, 0x07, // S7: protocol ID, ROSCTR = Userdata   7
+        0x00, 0x00, // redundancy id                        9
+        0x12, 0x00, // PDU reference                        11
+        0x00, 0x0C, // parameter length = 12                13
+        0x00, 0x04, // data length = 4                      15
         // --- Parameter block (12 bytes at 17–28) ---
-        0x00, 0x01, 0x12,        // param header                         17
-        0x08,                    // sub-length = 8                       20
-        0x12,                    // method = continuation                21
-        0x44,                    // type/group                           22
-        0x01,                    // subfunction = ReadSZL                23
-        seq_num,                 // PLC sequence number (echo)           24
+        0x00, 0x01, 0x12,    // param header                         17
+        0x08,    // sub-length = 8                       20
+        0x12,    // method = continuation                21
+        0x44,    // type/group                           22
+        0x01,    // subfunction = ReadSZL                23
+        seq_num, // PLC sequence number (echo)           24
         0x00, 0x00, 0x00, 0x00, // padding                              25
         // --- Data block (4 bytes at 29–32) ---
         0x0A, 0x00, 0x00, 0x00, //                                      29
@@ -334,11 +350,19 @@ fn parse_bcd_timestamp(data: &[u8; 8]) -> Option<S7DateTime> {
     fn bcd(b: u8) -> Option<u8> {
         let hi = b >> 4;
         let lo = b & 0x0F;
-        if hi > 9 || lo > 9 { None } else { Some(hi * 10 + lo) }
+        if hi > 9 || lo > 9 {
+            None
+        } else {
+            Some(hi * 10 + lo)
+        }
     }
 
     let year_raw = bcd(data[0])?;
-    let year = if year_raw < 90 { 2000u16 + year_raw as u16 } else { 1900u16 + year_raw as u16 };
+    let year = if year_raw < 90 {
+        2000u16 + year_raw as u16
+    } else {
+        1900u16 + year_raw as u16
+    };
     let month = bcd(data[1])?;
     let day = bcd(data[2])?;
     let hour = bcd(data[3])?;
@@ -347,11 +371,22 @@ fn parse_bcd_timestamp(data: &[u8; 8]) -> Option<S7DateTime> {
     // Byte 6: BCD tens+units of ms (0-99). Byte 7 high nibble: hundreds of ms (0-9).
     let ms_lo = bcd(data[6])? as u16;
     let ms_hi = data[7] >> 4;
-    if ms_hi > 9 { return None; }
+    if ms_hi > 9 {
+        return None;
+    }
     let millisecond = ms_hi as u16 * 100 + ms_lo;
     let weekday = data[7] & 0x0F;
 
-    Some(S7DateTime { year, month, day, hour, minute, second, millisecond, weekday })
+    Some(S7DateTime {
+        year,
+        month,
+        day,
+        hour,
+        minute,
+        second,
+        millisecond,
+        weekday,
+    })
 }
 
 impl S7Client {
@@ -361,7 +396,7 @@ impl S7Client {
     ///
     /// ### Returns
     /// A new `S7Client` ready to connect.
-    /// 
+    ///
     pub fn new() -> Self {
         S7Client {
             stream: None,
@@ -370,17 +405,17 @@ impl S7Client {
             rd_timeout_ms: 1000,
             wr_timeout_ms: 500,
             conn_type: CT_PG,
-            max_rd_pdu_data: 0, 
-            max_wr_pdu_data: 0, 
+            max_rd_pdu_data: 0,
+            max_wr_pdu_data: 0,
             pdu_length: 0x0000,
             connected: false,
             last_time: 0.0,
-            chunks:0,
+            chunks: 0,
         }
     }
 
     /// ### Check S7 Area validity
-    /// 
+    ///
     fn check_area(&mut self, area: u8) -> Result<(), S7Error> {
         const AREAS: [u8; 4] = [S7_AREA_PE, S7_AREA_PA, S7_AREA_MK, S7_AREA_DB];
         if !AREAS.contains(&area) {
@@ -403,8 +438,8 @@ impl S7Client {
     ///
     /// With very old PLCs (early S7300 series) that have limited communication resources,
     /// the connection may be rejected if we have S7Manager with many online windows open at the same time.
-    /// In this case, use `S7_OP` or `S7_BASIC`. 
-    /// 
+    /// In this case, use `S7_OP` or `S7_BASIC`.
+    ///
     /// ### Parameters
     /// - `connection_type`: Connection type.
     ///
@@ -413,17 +448,16 @@ impl S7Client {
     ///
     /// ### Errors
     /// - `S7Error::InvalidFunParam`: Invalid parameter supplied to the function.
-    /// 
+    ///
     /// #### Notes
     /// 1. The client must not be connected (that is, call this method before connecting).
     /// 2. This method is not useful if you use `connect_tsap()` because the connection_type is already contained in the REMOTE_TSAP record.
     ///    
     pub fn set_connection_type(&mut self, connection_type: u16) -> Result<(), S7Error> {
-        
-        if connection_type < CT_PG || connection_type > CT_S7 {
+        if !(CT_PG..=CT_S7).contains(&connection_type) {
             return Err(S7Error::InvalidFunParameter);
         }
-        
+
         self.conn_type = connection_type;
 
         Ok(())
@@ -435,19 +469,23 @@ impl S7Client {
     /// - `co_timeout_ms` : TCP Connection timeout (ms) (Default = 3000 ms)
     /// - `rd_timeout_ms` : Read Connection timeout (ms) (Default = 1000 ms)
     /// - `wr_timeout_ms` : Write Connection timeout (ms) (Default = 500 ms)
-    /// 
+    ///
     /// ### Returns
     /// `Ok(())` on success, or an `S7Error` on failure.
     ///
     /// ### Errors
     /// - `S7Error::InvalidFunParam`: Invalid parameter supplied to the function.
-    /// 
+    ///
     /// ### Notes
     /// 1. Values must be > 0, otherwise they are ignored
     /// 2. The client must not be connected (that is, call this method before connecting).
-    /// 
-    pub fn set_timeout(&mut self, co_timeout_ms: u64, rd_timeout_ms: u64, wr_timeout_ms: u64 ) -> Result<(), S7Error> {
-
+    ///
+    pub fn set_timeout(
+        &mut self,
+        co_timeout_ms: u64,
+        rd_timeout_ms: u64,
+        wr_timeout_ms: u64,
+    ) -> Result<(), S7Error> {
         if co_timeout_ms == 0 || rd_timeout_ms == 0 || wr_timeout_ms == 0 {
             return Err(S7Error::InvalidFunParameter);
         }
@@ -460,24 +498,23 @@ impl S7Client {
     }
 
     /// ### Sets the TCP Connection Port
-    /// 
+    ///
     /// The default S7 Port is 102, but if you need NAT the addresses you can use this method to change the default value.
-    /// 
+    ///
     /// ### Parameters
     /// - `port`: TCP Connection port (1..65535)
-    /// 
+    ///
     /// ### Returns
     /// `Ok(())` on success, or an `S7Error` on failure.
     ///
     /// ### Errors
     /// - `S7Error::InvalidFunParam`: Invalid parameter supplied to the function.
-    /// 
+    ///
     /// ### Notes
     /// 1. Value must be > 0, otherwise it is ignored
     /// 2. The client must not be connected (that is, call this method before connecting).
-    /// 
-    pub fn set_connection_port(&mut self, port: u16)  -> Result<(), S7Error> {
-
+    ///
+    pub fn set_connection_port(&mut self, port: u16) -> Result<(), S7Error> {
         if port == 0 {
             return Err(S7Error::InvalidFunParameter);
         }
@@ -492,23 +529,23 @@ impl S7Client {
     /// This helper method is same as `connect_rack_slot()` with rack=0 and slot=0
     /// ### Parameters
     /// - `ip`  : PLC IPV4 address.
-    /// 
+    ///
     /// ---
     /// For Notes, Return and Errors look at `connect_tsap()`
     ///
     pub fn connect_s71200_1500(&mut self, ip: &str) -> Result<(), S7Error> {
-        self.connect_rack_slot(ip, 0, 0)  
+        self.connect_rack_slot(ip, 0, 0)
     }
 
     /// ### Connects to the S7300 family
-    /// 
+    ///
     /// This helper method is same as `connect_rack_slot()` with rack=0 and slot=2
     /// ### Parameters
     /// - `ip`  : PLC IPV4 address.
-    /// 
+    ///
     /// ---
     /// For Notes, Return and Errors look at `connect_tsap()`
-    /// 
+    ///
     pub fn connect_s7300(&mut self, ip: &str) -> Result<(), S7Error> {
         self.connect_rack_slot(ip, 0, 2)
     }
@@ -518,22 +555,21 @@ impl S7Client {
     /// Rack and Slot are Hardware configuration parameters.
     ///
     /// For S7300 and S71200/1500 they are fixed, (see `connect_s7300()` and `connect_s71200_1500()` ).
-    /// 
-    /// Ultimately, you will need of this method only to connect to S7400, WinAC or other Siemens 
+    ///
+    /// Ultimately, you will need of this method only to connect to S7400, WinAC or other Siemens
     /// hardware, like Drives, which Rack and Slot can vary.
-    /// 
+    ///
     /// ### Parameters
     /// - `ip` : PLC IPV4 address.
     /// - `rack` : CPU/CU Rack.
     /// - `slot` : CPU/CU Slot.
-    /// 
+    ///
     /// ---
     /// For Notes, Return and Errors look at `connect_tsap()`
-    /// 
+    ///
     pub fn connect_rack_slot(&mut self, ip: &str, rack: u16, slot: u16) -> Result<(), S7Error> {
-
         let local_tsap: u16 = 0x0100;
-        let remote_tsap: u16 = (self.conn_type << 8) + (rack * 0x20) + slot;        
+        let remote_tsap: u16 = (self.conn_type << 8) + (rack * 0x20) + slot;
         self.connect_tsap(ip, local_tsap, remote_tsap)
     }
 
@@ -541,12 +577,12 @@ impl S7Client {
     ///
     /// This is the deepest connection method, you will need it only to connect to LOGO! or S7200.
     /// It's internally called by all other connection methods.
-    /// 
+    ///
     /// ### Parameters
     /// - `ip` : PLC IPV4 address.
     /// - `local_tsap` : Client TSAP.
     /// - `remote_tsap` : Server TSAP (PLC).
-    /// 
+    ///
     /// ### Notes
     /// ```text
     /// The connection port used is 102 (S7Protocol Port) unless you
@@ -561,53 +597,62 @@ impl S7Client {
     /// - `S7Error::IsoConnectionFailed`: ISO connection failed
     /// - `S7Error::PduNegotiationFailed`: PDU negotiation failed.
     /// - `S7Error::Io`: network I/O error.
-    /// 
-    pub fn connect_tsap(&mut self, ip: &str, local_tsap: u16, remote_tsap: u16) -> Result<(), S7Error> {
-   
+    ///
+    pub fn connect_tsap(
+        &mut self,
+        ip: &str,
+        local_tsap: u16,
+        remote_tsap: u16,
+    ) -> Result<(), S7Error> {
         self.connected = false;
         self.last_time = 0.0;
-        let start_time = Instant::now();      
-        
+        let start_time = Instant::now();
+
         let addr = format!("{}:{}", ip, self.port);
         let co_timeout = Duration::from_millis(self.co_timeout_ms);
         let rd_timeout = Duration::from_millis(self.rd_timeout_ms);
         let wr_timeout = Duration::from_millis(self.wr_timeout_ms);
 
-        let mut stream = TcpStream::connect_timeout(&addr.to_socket_addrs()?.next().ok_or(S7Error::TcpConnectionFailed)?, co_timeout)?;
-        
+        let mut stream = TcpStream::connect_timeout(
+            &addr
+                .to_socket_addrs()?
+                .next()
+                .ok_or(S7Error::TcpConnectionFailed)?,
+            co_timeout,
+        )?;
+
         stream.set_read_timeout(Some(rd_timeout))?;
         stream.set_write_timeout(Some(wr_timeout))?;
         stream.set_nodelay(true)?;
-        
 
         // ISO-on-TCP handshake
         let iso_cr: [u8; ISO_CR_LEN] = [
-		    // TPKT (RFC1006 Header)
-            ISO_ID, // RFC 1006 ID (3) 
-            0x00,   // Reserved, always 0
+            // TPKT (RFC1006 Header)
+            ISO_ID,               // RFC 1006 ID (3)
+            0x00,                 // Reserved, always 0
             hi_part!(ISO_CR_LEN), // High part of packet lenght (entire frame, payload and TPDU included)
             lo_part!(ISO_CR_LEN), // Low part of packet lenght (entire frame, payload and TPDU included)
             // COTP (ISO 8073 Header)
-            0x11, // PDU Size Length
-            ISO_CONN_REQ, // CR - Connection Request ID
-            0x00, // Dst Reference HI
-            0x00, // Dst Reference LO
-            0x00, // Src Reference HI
-            0x01, // Src Reference LO
-            0x00, // Class + Options Flags
-            0xC0, // PDU Max Length ID
-            0x01, // PDU Max Length HI
-            0x0A, // PDU Max Length LO
-            0xC1, // Src TSAP Identifier
-            0x02, // Src TSAP Length (2 bytes)
-            hi_part!(local_tsap), // Loc TSAP HI 
-            lo_part!(local_tsap), // Loc TSAP LO 
-            0xC2, // Rem TSAP Identifier
-            0x02, // Rem TSAP Length (2 bytes)
-            hi_part!(remote_tsap), // Rem TSAP HI 
-            lo_part!(remote_tsap)  // Rem TSAP LO 
+            0x11,                  // PDU Size Length
+            ISO_CONN_REQ,          // CR - Connection Request ID
+            0x00,                  // Dst Reference HI
+            0x00,                  // Dst Reference LO
+            0x00,                  // Src Reference HI
+            0x01,                  // Src Reference LO
+            0x00,                  // Class + Options Flags
+            0xC0,                  // PDU Max Length ID
+            0x01,                  // PDU Max Length HI
+            0x0A,                  // PDU Max Length LO
+            0xC1,                  // Src TSAP Identifier
+            0x02,                  // Src TSAP Length (2 bytes)
+            hi_part!(local_tsap),  // Loc TSAP HI
+            lo_part!(local_tsap),  // Loc TSAP LO
+            0xC2,                  // Rem TSAP Identifier
+            0x02,                  // Rem TSAP Length (2 bytes)
+            hi_part!(remote_tsap), // Rem TSAP HI
+            lo_part!(remote_tsap), // Rem TSAP LO
         ];
-        
+
         stream.write_all(&iso_cr)?;
 
         let mut iso_resp = [0u8; ISO_CR_LEN];
@@ -620,26 +665,47 @@ impl S7Client {
 
         // S7 PDU Negotiation Telegram (contains also ISO Header and COTP Header)
         let s7_pn: [u8; ISO_PN_REQ_LEN] = [
-            ISO_ID, 
-            0x00, 
-            0x00, 0x19, 
-            0x02, 0xf0, 0x80, 
-            S7_ID, 0x01, 0x00, 0x00, 0x04, 0x00, 0x00, 0x08, 0x00, 
-            0x00, 0xf0, 0x00, 0x00, 0x01, 0x00, 0x01, 
+            ISO_ID,
+            0x00,
+            0x00,
+            0x19,
+            0x02,
+            0xf0,
+            0x80,
+            S7_ID,
+            0x01,
+            0x00,
+            0x00,
+            0x04,
+            0x00,
+            0x00,
+            0x08,
+            0x00,
+            0x00,
+            0xf0,
+            0x00,
+            0x00,
+            0x01,
+            0x00,
+            0x01,
             hi_part!(PDU_LEN_REQ),
-            lo_part!(PDU_LEN_REQ)
+            lo_part!(PDU_LEN_REQ),
         ];
         stream.write_all(&s7_pn)?;
         let mut pn_resp = [0u8; ISO_PN_RES_LEN];
-        
+
         let size_pn = stream.read(&mut pn_resp)?;
-        
-        if size_pn < ISO_PN_RES_LEN || pn_resp[0] != ISO_ID || pn_resp[7] != S7_ID || pn_resp[17] != 0x00 {
+
+        if size_pn < ISO_PN_RES_LEN
+            || pn_resp[0] != ISO_ID
+            || pn_resp[7] != S7_ID
+            || pn_resp[17] != 0x00
+        {
             return Err(S7Error::PduNegotiationFailed);
         }
 
         self.pdu_length = make_u16!(pn_resp[25], pn_resp[26]);
-       
+
         if self.pdu_length == 0 {
             return Err(S7Error::PduNegotiationFailed);
         }
@@ -657,12 +723,12 @@ impl S7Client {
     ///
     /// Safe to call even if the client is not currently connected.
     /// After disconnection, calls to read/write will return `S7Error::NotConnected`.
-    /// 
+    ///
     /// ### Notes
     /// ```text
     /// A Client should be disconnected on low-level error (see read_area() and write_area() suggestion)
     /// ```
-    /// 
+    ///
     pub fn disconnect(&mut self) {
         if self.connected {
             // If we are disconnecting on a low-level error it's better to flush the socket
@@ -688,14 +754,14 @@ impl S7Client {
     /// - `S7_AREA_PA` (0x82): Process Outputs
     /// - `S7_AREA_MK` (0x83): Merkers
     /// - `S7_AREA_DB` (0x84): Data Block
-    /// #### wordlen 
+    /// #### wordlen
     /// - `S7_WL_BIT` (0x01) : Bit access
     /// - `S7_WL_BYTE` (0x02): Byte access
     /// #### Bit access notes
     /// 1. The start must be expressed in bits.
     ///    For example, if you want to access bit `DBX 45.3`, the start value would be 45 * 8 + 3 = 363.
     /// 2. Whatever buffer is passed, only the first byte will be used, which is considered true if !=0 or false if ==0
-    /// 
+    ///
     /// ### Returns
     /// `Ok(())` Operation succeeded.
     ///
@@ -710,26 +776,32 @@ impl S7Client {
     ///
     /// #### Suggestion
     /// In case of a low-level error, it is **highly recommended** to disconnect and reconnect the Client (as WinCC or other SCADA do)
-    /// 
+    ///
     /// #### High level
     /// - `S7Error::InvalidFunParam`: Invalid parameter supplied to the function.
     /// - `S7Error::NotFound`: The resource was not found (e.g. Inexistent DB).
     /// - `S7Error::S7InvalidAddress`:
     /// 1. Attempt to read beyond the limits.
     /// 2. The DB is optimized.
-    /// 
+    ///
     /// ### Notes
     /// - The number of bytes to read will be equal to the size of the buffer passed.
     /// - Large blocks are automatically split into chunks based on the negotiated PDU size.
     /// - In case of error the buffer contents will be inconsistent and should not be considered.
-    /// 
-    pub fn read_area(&mut self, area: u8, db_number: u16, start: u16, wordlen: u8, buffer: &mut [u8]) -> Result<(), S7Error> {
-
+    ///
+    pub fn read_area(
+        &mut self,
+        area: u8,
+        db_number: u16,
+        start: u16,
+        wordlen: u8,
+        buffer: &mut [u8],
+    ) -> Result<(), S7Error> {
         self.last_time = 0.0;
         self.chunks = 0;
 
         // Check Area
-        let _ = self.check_area(area)?;
+        self.check_area(area)?;
 
         // Check Word Length
         if wordlen != S7_WL_BIT && wordlen != S7_WL_BYTE {
@@ -740,7 +812,7 @@ impl S7Client {
         if !self.connected {
             return Err(S7Error::NotConnected);
         }
-      
+
         let start_time = Instant::now();
 
         let datasize: u16 = if wordlen == S7_WL_BYTE {
@@ -749,45 +821,55 @@ impl S7Client {
             1 // Only 1 element allowed for bit operations
         };
 
-        let stream = self.stream.as_mut().unwrap();      
-       
+        let stream = self.stream.as_mut().unwrap();
+
         let mut offset = 0;
         let mut long_start: u32 = start as u32;
 
         while offset < datasize {
             let remaining = datasize - offset;
             let chunk_size = remaining.min(self.max_rd_pdu_data);
-            self.chunks+=1;
+            self.chunks += 1;
 
             // Read Request Header
-            let mut request: [u8; READ_REQ_LEN] = [ 
-                ISO_ID, 0x00,         // RFC 1006 ID (constant)                   0
-                0x00, 0x1f,           // Telegram Length (31)                     2
-                0x02, 0xf0, 0x80,     // COPT (constant)                          4
-                S7_ID,                // S7 Protocol ID                           7
-                0x01,                 // Job Type (Data)                          8
-                0x00, 0x00,           // Redundancy identification                9
-                0x05, 0x00,           // PDU Reference                            11  
-                0x00, 0x0e,           // Parameters Length (HI,LO) = 14           13 
-                0x00, 0x00,           // No write Payload here : 0                15
+            let mut request: [u8; READ_REQ_LEN] = [
+                ISO_ID,
+                0x00, // RFC 1006 ID (constant)                   0
+                0x00,
+                0x1f, // Telegram Length (31)                     2
+                0x02,
+                0xf0,
+                0x80,  // COPT (constant)                          4
+                S7_ID, // S7 Protocol ID                           7
+                0x01,  // Job Type (Data)                          8
+                0x00,
+                0x00, // Redundancy identification                9
+                0x05,
+                0x00, // PDU Reference                            11
+                0x00,
+                0x0e, // Parameters Length (HI,LO) = 14           13
+                0x00,
+                0x00,                 // No write Payload here : 0                15
                 0x04,                 // Function: 4 Read Var, 5 Write Var        17
                 0x01,                 // Items count (used for multivar R/W)      18
                 0x12,                 // Var spec.                                19
                 0x0a,                 // constant 0x0a                            20
                 0x10,                 // Syntax ID                                21
-                wordlen,              // WordLen                                  22 
+                wordlen,              // WordLen                                  22
                 hi_part!(chunk_size), // HI (Read Payload Size)                   23
                 lo_part!(chunk_size), // LO (Read Payload Size)                   24
                 hi_part!(db_number),  // HI DB Number                             25
                 lo_part!(db_number),  // LO DB Number                             26
-                area,                 // Area                                     27 
-                0x00, 0x00, 0x00      // 24 bit Address (see below)               28
+                area,                 // Area                                     27
+                0x00,
+                0x00,
+                0x00, // 24 bit Address (see below)               28
             ];
 
-            let address = if wordlen == S7_WL_BIT { 
-                long_start 
-            } else { 
-                long_start << 3 
+            let address = if wordlen == S7_WL_BIT {
+                long_start
+            } else {
+                long_start << 3
             };
 
             request[28] = ((address >> 16) & 0xFF) as u8;
@@ -795,7 +877,7 @@ impl S7Client {
             request[30] = (address & 0xFF) as u8;
 
             stream.write_all(&request)?;
-            
+
             // Read and check ISO header
             let mut iso_packet = [0u8; TPKT_ISO_LEN];
             stream.read_exact(&mut iso_packet)?;
@@ -818,12 +900,13 @@ impl S7Client {
                 match response[RW_RES_OFFSET] {
                     RES_NOT_FOUND => return Err(S7Error::S7NotFound),
                     RES_INVALID_ADDRESS => return Err(S7Error::S7InvalidAddress),
-                    _ => return Err(S7Error::S7Unspecified)
+                    _ => return Err(S7Error::S7Unspecified),
                 }
             }
-          
+
             // Copy payload
-            let payload = &response[READ_RES_LEN..READ_RES_LEN + (size_resp - READ_RES_LEN).min(chunk_size as usize)];
+            let payload = &response
+                [READ_RES_LEN..READ_RES_LEN + (size_resp - READ_RES_LEN).min(chunk_size as usize)];
             buffer[offset as usize..offset as usize + payload.len()].copy_from_slice(payload);
 
             offset += chunk_size;
@@ -832,7 +915,7 @@ impl S7Client {
 
         self.last_time = start_time.elapsed().as_secs_f64() * 1000.0;
 
-        Ok(())     
+        Ok(())
     }
 
     /// ### Writes a block of data to a specific S7 memory area.
@@ -850,15 +933,15 @@ impl S7Client {
     /// - `S7_AREA_PA` (0x82): Process Outputs
     /// - `S7_AREA_MK` (0x83): Merkers
     /// - `S7_AREA_DB` (0x84): Data Block
-    /// #### wordlen 
+    /// #### wordlen
     /// - `S7_WL_BIT` (0x01) : Bit access
     /// - `S7_WL_BYTE` (0x02): Byte access
     /// #### Bit access notes
     /// 1. The start must be expressed in bits.
     ///    For example, if you want to access bit `DBX 45.3`, the start value would be 45 * 8 + 3 = 363.
     /// 2. Whatever buffer is passed, only the first byte will be used, which is considered true if !=0 or false if ==0
-    /// 3. Writing a bit affects **only that bit**, leaving adjacent bits in the byte unchanged. 
-    /// 
+    /// 3. Writing a bit affects **only that bit**, leaving adjacent bits in the byte unchanged.
+    ///
     /// ### Returns
     /// `Ok(())` Operation succeeded.
     ///
@@ -873,27 +956,33 @@ impl S7Client {
     ///
     /// #### Suggestion
     /// In case of a low-level error, it is **highly recommended** to disconnect and reconnect the Client (as WinCC or other SCADA do)
-    /// 
+    ///
     /// #### High level
     /// - `S7Error::InvalidFunParam`: Invalid parameter supplied to the function.
     /// - `S7Error::NotFound`: The resource was not found (e.g. Inexistent DB).
     /// - `S7Error::S7InvalidAddress`:
     /// 1. Attempt to write beyond the limits.
     /// 2. The DB is optimized.
-    /// 
+    ///
     /// ### Notes
     /// - The number of bytes to write will be equal to the size of the buffer passed.
     /// - Large blocks are automatically split into chunks based on the negotiated PDU size.
-    /// - Writing the output buffer (`S7_AREA_PA`) usually does not produce useful results, in fact the output process image 
+    /// - Writing the output buffer (`S7_AREA_PA`) usually does not produce useful results, in fact the output process image
     /// will be rewritten by OB1 in the next round
-    /// 
-    pub fn write_area(&mut self, area: u8, db_number: u16, start: u16, wordlen: u8, buffer: &[u8]) -> Result<(), S7Error> {
-
+    ///
+    pub fn write_area(
+        &mut self,
+        area: u8,
+        db_number: u16,
+        start: u16,
+        wordlen: u8,
+        buffer: &[u8],
+    ) -> Result<(), S7Error> {
         self.last_time = 0.0;
         self.chunks = 0;
 
         // Check Area
-        let _ = self.check_area(area)?;
+        self.check_area(area)?;
 
         // Check Word Length
         if wordlen != S7_WL_BIT && wordlen != S7_WL_BYTE {
@@ -915,59 +1004,76 @@ impl S7Client {
         } else {
             1 // Only 1 element allowed for bit operations
         };
-        
-        let transport: u8 = if wordlen == S7_WL_BIT { TS_RES_BIT } else { TS_RES_BYTE };
 
-        while offset < datasize{
-            self.chunks+=1;
+        let transport: u8 = if wordlen == S7_WL_BIT {
+            TS_RES_BIT
+        } else {
+            TS_RES_BYTE
+        };
+
+        while offset < datasize {
+            self.chunks += 1;
             let chunk_size = (datasize - offset).min(self.max_wr_pdu_data as usize);
             let chunk = &buffer[offset..offset + chunk_size];
 
-            let bits_payload: u16 = if wordlen == S7_WL_BIT { 1 } else { (chunk_size << 3) as u16 };
+            let bits_payload: u16 = if wordlen == S7_WL_BIT {
+                1
+            } else {
+                (chunk_size << 3) as u16
+            };
 
             // 35 byte Write Request Header
-            let mut request = vec![ 
-                ISO_ID, 0x00,            // RFC 1006 ID (constant)
-                0x00, 0x00,              // Telegram Length (HI,LO) = Payload Size + 35
-                0x02, 0xf0, 0x80,        // COPT (constant)
-                S7_ID,                   // S7 Protocol ID 
-                0x01,                    // Job Type (Data)
-                0x00, 0x00,              // Redundancy identification 
-                0x05, 0x00,              // PDU Reference
-                0x00, 0x0e,              // Parameters Length (HI,LO) = 14
-                hi_part!(chunk_size + 4),// HI (Payload Size + 4) 
-                lo_part!(chunk_size + 4),// LO (Payload Size + 4)
-                0x05,                    // Function: 4 Read Var, 5 Write Var 
-                0x01,                    // Items count (used for multivar R/W)
-                0x12,                    // Var spec.
-                0x0a,                    // constant 0x0a
-                0x10,                    // Syntax ID 
+            let mut request = vec![
+                ISO_ID,
+                0x00, // RFC 1006 ID (constant)
+                0x00,
+                0x00, // Telegram Length (HI,LO) = Payload Size + 35
+                0x02,
+                0xf0,
+                0x80,  // COPT (constant)
+                S7_ID, // S7 Protocol ID
+                0x01,  // Job Type (Data)
+                0x00,
+                0x00, // Redundancy identification
+                0x05,
+                0x00, // PDU Reference
+                0x00,
+                0x0e,                     // Parameters Length (HI,LO) = 14
+                hi_part!(chunk_size + 4), // HI (Payload Size + 4)
+                lo_part!(chunk_size + 4), // LO (Payload Size + 4)
+                0x05,                     // Function: 4 Read Var, 5 Write Var
+                0x01,                     // Items count (used for multivar R/W)
+                0x12,                     // Var spec.
+                0x0a,                     // constant 0x0a
+                0x10,                     // Syntax ID
                 wordlen,
-                hi_part!(chunk_size),    // HI Payload size
-                lo_part!(chunk_size),    // LO Payload size               
-                hi_part!(db_number),     // HI DB Number 
-                lo_part!(db_number),     // LO DB Number               
-                area,                    // Area ID
-                0x00, 0x00, 0x00,        // 24 bit Address (see below)
-                0x00,                    // Reserved
-                transport,               // TS_RES_BIT or TS_RES_BYTE
-                hi_part!(bits_payload),  // HI Payload size (bits) 
-                lo_part!(bits_payload)   // LO Payload size (bits)
+                hi_part!(chunk_size), // HI Payload size
+                lo_part!(chunk_size), // LO Payload size
+                hi_part!(db_number),  // HI DB Number
+                lo_part!(db_number),  // LO DB Number
+                area,                 // Area ID
+                0x00,
+                0x00,
+                0x00,                   // 24 bit Address (see below)
+                0x00,                   // Reserved
+                transport,              // TS_RES_BIT or TS_RES_BYTE
+                hi_part!(bits_payload), // HI Payload size (bits)
+                lo_part!(bits_payload), // LO Payload size (bits)
             ];
 
             request.extend_from_slice(chunk); // Append the Payload to the Header
 
             let total_len = request.len();
-            
+
             // Set Telegram length
             request[2] = hi_part!(total_len);
             request[3] = lo_part!(total_len);
 
             // Set Start Address (bits) inside the area
-            let address = if wordlen == S7_WL_BIT { 
-                long_start 
-            } else { 
-                long_start << 3 
+            let address = if wordlen == S7_WL_BIT {
+                long_start
+            } else {
+                long_start << 3
             };
 
             request[28] = ((address >> 16) & 0xFF) as u8;
@@ -998,7 +1104,7 @@ impl S7Client {
                 match response[RW_RES_OFFSET] {
                     RES_NOT_FOUND => return Err(S7Error::S7NotFound),
                     RES_INVALID_ADDRESS => return Err(S7Error::S7InvalidAddress),
-                    _ => return Err(S7Error::S7Unspecified)
+                    _ => return Err(S7Error::S7Unspecified),
                 }
             }
 
@@ -1009,7 +1115,7 @@ impl S7Client {
 
         self.last_time = start_time.elapsed().as_secs_f64() * 1000.0;
 
-        Ok(())     
+        Ok(())
     }
 
     /// ### Reads a block of byte from a specific Data Block (DB)
@@ -1017,18 +1123,23 @@ impl S7Client {
     /// This helper method is same as `read_area()` with:
     /// - area = `S7_AREA_DB`
     /// - wordlen = `S7_WL_BYTE`
-    /// 
+    ///
     /// ### Parameters
-    /// - `db_number`: DB number 
-    /// - `start`: Starting byte index 
+    /// - `db_number`: DB number
+    /// - `start`: Starting byte index
     /// - `buffer`: Destination buffer to store the read data.
-    /// 
+    ///
     /// ### Notes
     /// - The number of bytes to read will be equal to the size of the buffer passed.
     /// ---
     /// For further info, please refer to `read_area()`
-    /// 
-    pub fn read_db(&mut self, db_number: u16, start: u16, buffer: &mut [u8]) -> Result<(), S7Error> {
+    ///
+    pub fn read_db(
+        &mut self,
+        db_number: u16,
+        start: u16,
+        buffer: &mut [u8],
+    ) -> Result<(), S7Error> {
         self.read_area(S7_AREA_DB, db_number, start, S7_WL_BYTE, buffer)
     }
 
@@ -1037,25 +1148,25 @@ impl S7Client {
     /// This helper method is same as `read_area()` with:
     /// - wordlen = `S7_WL_BIT`
     /// - start = `byte_num * 8 + bit_idx`
-    /// 
+    ///
     /// ### Parameters
     /// - `area`: S7 memory area constant (e.g., `S7_AREA_PE`, `S7_AREA_PA`, `S7_AREA_DB`, `S7_AREA_MK`).
     /// - `db_number`: DB number (ignored for non-DB areas).
-    /// - `byte_num`: Byte Number. 
+    /// - `byte_num`: Byte Number.
     /// - `bit_idx`: Bit index inside the byte (0..7).
-    /// 
+    ///
     /// ### Example
     /// To read DB10.DBX71.4 use:
-    /// 
+    ///
     /// ```my_bit = read_bit(S7_AREA_DB, 10, 71, 4);```
-    /// 
+    ///
     /// ### Returns
     /// `Ok(<bool>)` or `Err(<S7Error>)`
-    /// 
+    ///
     /// ### Errors
     /// - `S7Error::InvalidFunParam`: Invalid parameter supplied to the function.
     /// - Other reported by read_area()
-    /// 
+    ///
     /// ### Suggestion
     ///
     /// ```text
@@ -1066,16 +1177,21 @@ impl S7Client {
     /// ```
     /// ---
     /// For further info, please refer to `read_area()`
-    /// 
-    pub fn read_bit(&mut self, area: u8, db_number: u16, byte_num: u16, bit_idx: u8) -> Result<bool, S7Error> {
-
-        if bit_idx > 7 { 
-            return Err(S7Error::InvalidFunParameter); 
+    ///
+    pub fn read_bit(
+        &mut self,
+        area: u8,
+        db_number: u16,
+        byte_num: u16,
+        bit_idx: u8,
+    ) -> Result<bool, S7Error> {
+        if bit_idx > 7 {
+            return Err(S7Error::InvalidFunParameter);
         }
-  
+
         let start: u16 = byte_num * 8 + bit_idx as u16;
         let mut buffer = [0u8; 1];
-        
+
         self.read_area(area, db_number, start, S7_WL_BIT, &mut buffer)?;
 
         Ok(buffer[0] != 0)
@@ -1086,17 +1202,17 @@ impl S7Client {
     /// This helper method is same as `write_area()` with:
     /// - area = `S7_AREA_DB`
     /// - wordlen = `S7_WL_BYTE`
-    /// 
+    ///
     /// ### Parameters
-    /// - `db_number`: DB number 
-    /// - `start`: Starting byte index 
+    /// - `db_number`: DB number
+    /// - `start`: Starting byte index
     /// - `buffer`: Source buffer to write.
-    /// 
+    ///
     /// ### Notes
     /// - The number of bytes to write will be equal to the size of the buffer passed.
     /// ---
     /// For further info, please refer to `write_area()`
-    /// 
+    ///
     pub fn write_db(&mut self, db_number: u16, start: u16, buffer: &[u8]) -> Result<(), S7Error> {
         self.write_area(S7_AREA_DB, db_number, start, S7_WL_BYTE, buffer)
     }
@@ -1106,35 +1222,41 @@ impl S7Client {
     /// This helper method is same as `write_area()` with:
     /// - wordlen = `S7_WL_BIT`
     /// - start = `byte_num * 8 + bit_idx`
-    /// 
+    ///
     /// ### Parameters
     /// - `area`: S7 memory area constant (e.g., `S7_AREA_PE`, `S7_AREA_PA`, `S7_AREA_DB`, `S7_AREA_MK`).
     /// - `db_number`: DB number (ignored for non-DB areas).
-    /// - `byte_num`: Byte Number. 
+    /// - `byte_num`: Byte Number.
     /// - `bit_idx`: Bit index inside the byte (0..7).
     /// - `value`: Value to write (true | false).
-    /// 
+    ///
     /// ### Example
     /// To write **1** into DB10.DBX71.4 use:
-    /// 
+    ///
     /// ```write_bit(S7_AREA_DB, 10, 71, 4, true);```
-    /// 
+    ///
     /// ### Returns
     /// `Ok(())` Operation succeeded.
-    /// 
+    ///
     /// ### Errors
     /// - `S7Error::InvalidFunParam`: Invalid parameter supplied to the function.
     /// - Other reported by read_area()
-    /// 
+    ///
     /// ### Notes
     /// ```text
     /// Writing a bit affects only that bit, leaving adjacent bits in the byte unchanged.
     /// ```
     /// ---
     /// For further info, please refer to `write_area()`
-    /// 
-   pub fn write_bit(&mut self, area: u8, db_number: u16, byte_num: u16, bit_idx: u8, value: bool) -> Result<(), S7Error> {
-
+    ///
+    pub fn write_bit(
+        &mut self,
+        area: u8,
+        db_number: u16,
+        byte_num: u16,
+        bit_idx: u8,
+        value: bool,
+    ) -> Result<(), S7Error> {
         if bit_idx > 7 {
             return Err(S7Error::InvalidFunParameter);
         }
@@ -1143,7 +1265,7 @@ impl S7Client {
         let mut data = [0u8; 1];
         data[0] = value as u8;
 
-        self.write_area(area, db_number, start, S7_WL_BIT, &mut data)
+        self.write_area(area, db_number, start, S7_WL_BIT, &data)
     }
 
     // ── SZL (System Status List) ─────────────────────────────────────────────
@@ -1198,7 +1320,10 @@ impl S7Client {
                 return Err(S7Error::SzlReadFailed);
             }
 
-            let payload_len = make_u16!(response[SZL_DATA_LEN_OFFSET], response[SZL_DATA_LEN_OFFSET + 1]) as usize;
+            let payload_len = make_u16!(
+                response[SZL_DATA_LEN_OFFSET],
+                response[SZL_DATA_LEN_OFFSET + 1]
+            ) as usize;
             let payload_end = (SZL_PAYLOAD_OFFSET + payload_len).min(size_resp);
 
             if is_first {
@@ -1211,8 +1336,14 @@ impl S7Client {
                 if payload_end < SZL_PAYLOAD_OFFSET + 8 {
                     return Err(S7Error::IsoInvalidTelegram);
                 }
-                length_dr = make_u16!(response[SZL_PAYLOAD_OFFSET + 4], response[SZL_PAYLOAD_OFFSET + 5]);
-                n_dr = make_u16!(response[SZL_PAYLOAD_OFFSET + 6], response[SZL_PAYLOAD_OFFSET + 7]);
+                length_dr = make_u16!(
+                    response[SZL_PAYLOAD_OFFSET + 4],
+                    response[SZL_PAYLOAD_OFFSET + 5]
+                );
+                n_dr = make_u16!(
+                    response[SZL_PAYLOAD_OFFSET + 6],
+                    response[SZL_PAYLOAD_OFFSET + 7]
+                );
                 let rec_start = SZL_PAYLOAD_OFFSET + 8;
                 if rec_start < payload_end {
                     records.extend_from_slice(&response[rec_start..payload_end]);
@@ -1239,7 +1370,10 @@ impl S7Client {
 
         self.last_time = start_time.elapsed().as_secs_f64() * 1000.0;
 
-        Ok(Szl { header: SzlHeader { length_dr, n_dr }, data: records })
+        Ok(Szl {
+            header: SzlHeader { length_dr, n_dr },
+            data: records,
+        })
     }
 
     /// ### Reads a raw SZL (System Status List) block from the PLC.
@@ -1291,7 +1425,11 @@ impl S7Client {
             let timestamp = parse_bcd_timestamp(&ts_bytes);
             let mut info = [0u8; 10];
             info.copy_from_slice(&rec[10..20]);
-            entries.push(DiagnosticEntry { event_id, timestamp, info });
+            entries.push(DiagnosticEntry {
+                event_id,
+                timestamp,
+                info,
+            });
             off += ENTRY_LEN;
         }
         Ok(entries)

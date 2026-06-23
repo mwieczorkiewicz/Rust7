@@ -56,10 +56,14 @@ cargo check --tests
 ### Lint and Format
 
 ```bash
-cargo clippy
 cargo fmt
 cargo fmt --check
+cargo clippy
+cargo clippy --fix  # auto-applies machine-applicable suggestions; commit the result
 ```
+
+Use `cargo check` (not `cargo build`) for fast incremental correctness checks during iteration.
+Run `cargo clippy --fix` after each feature commit; if it makes changes, create a follow-up `chore:` commit.
 
 ### Documentation
 
