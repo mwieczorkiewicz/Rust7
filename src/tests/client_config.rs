@@ -1,4 +1,4 @@
-use crate::{S7Client, S7Error, CT_PG, CT_OP, CT_S7};
+use crate::{S7Client, S7Error, CT_OP, CT_PG, CT_S7};
 
 // --- set_connection_type ---
 

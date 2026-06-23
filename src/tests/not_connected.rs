@@ -37,10 +37,7 @@ fn read_db_not_connected() {
 fn write_db_not_connected() {
     let mut c = S7Client::new();
     let buf = [0u8; 4];
-    assert!(matches!(
-        c.write_db(1, 0, &buf),
-        Err(S7Error::NotConnected)
-    ));
+    assert!(matches!(c.write_db(1, 0, &buf), Err(S7Error::NotConnected)));
 }
 
 #[test]

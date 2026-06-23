@@ -5,7 +5,9 @@ use super::common;
 #[test]
 fn read_db1_hello_s7() {
     let container = common::start_softplc();
-    let s7_port = container.get_host_port_ipv4(102).expect("port 102 not mapped");
+    let s7_port = container
+        .get_host_port_ipv4(102)
+        .expect("port 102 not mapped");
     let mut client = common::connect_client(s7_port);
 
     let mut buf = [0u8; 10];
@@ -16,8 +18,12 @@ fn read_db1_hello_s7() {
 #[test]
 fn write_db2_read_back() {
     let container = common::start_softplc();
-    let s7_port = container.get_host_port_ipv4(102).expect("port 102 not mapped");
-    let rest_port = container.get_host_port_ipv4(8080).expect("port 8080 not mapped");
+    let s7_port = container
+        .get_host_port_ipv4(102)
+        .expect("port 102 not mapped");
+    let rest_port = container
+        .get_host_port_ipv4(8080)
+        .expect("port 8080 not mapped");
     common::provision_db(rest_port, 2, 1024);
     let mut client = common::connect_client(s7_port);
 
@@ -32,7 +38,9 @@ fn write_db2_read_back() {
 #[test]
 fn read_bit_db1() {
     let container = common::start_softplc();
-    let s7_port = container.get_host_port_ipv4(102).expect("port 102 not mapped");
+    let s7_port = container
+        .get_host_port_ipv4(102)
+        .expect("port 102 not mapped");
     let mut client = common::connect_client(s7_port);
 
     // exercises the full bit-read protocol path; value depends on DB1 init data
@@ -43,8 +51,12 @@ fn read_bit_db1() {
 #[test]
 fn write_bit_db2_then_verify() {
     let container = common::start_softplc();
-    let s7_port = container.get_host_port_ipv4(102).expect("port 102 not mapped");
-    let rest_port = container.get_host_port_ipv4(8080).expect("port 8080 not mapped");
+    let s7_port = container
+        .get_host_port_ipv4(102)
+        .expect("port 102 not mapped");
+    let rest_port = container
+        .get_host_port_ipv4(8080)
+        .expect("port 8080 not mapped");
     common::provision_db(rest_port, 2, 1024);
     let mut client = common::connect_client(s7_port);
 
@@ -60,8 +72,12 @@ fn write_bit_db2_then_verify() {
 #[test]
 fn large_read_auto_chunks() {
     let container = common::start_softplc();
-    let s7_port = container.get_host_port_ipv4(102).expect("port 102 not mapped");
-    let rest_port = container.get_host_port_ipv4(8080).expect("port 8080 not mapped");
+    let s7_port = container
+        .get_host_port_ipv4(102)
+        .expect("port 102 not mapped");
+    let rest_port = container
+        .get_host_port_ipv4(8080)
+        .expect("port 8080 not mapped");
     common::provision_db(rest_port, 2, 1024);
     let mut client = common::connect_client(s7_port);
 
