@@ -4,3 +4,4 @@ When working with an PLC SDK, it may be challenging to work with the SDK if you 
 
 - See [Docker](./docker/README.md) for running the Rust7 SDK against a S7-PLC in Docker. 
 - See [SDK](./sdk/README.md) for learning more with practical examples, that shows how to use the Rust7 SDK in a practical way.
+- See [Diagnostics](./diagnostics/README.md) for reading SZL / diagnostic buffer data from a PLC (`read_cpu_info`, `read_szl`, `read_diagnostic_buffer`).
