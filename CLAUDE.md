@@ -1,0 +1,373 @@
+# rust7 Development Guide
+
+## Table of Contents
+
+- [High Level Overview](#high-level-overview)
+- [Quick Start](#quick-start)
+- [Commands](#commands)
+- [Testing](#testing)
+- [Codebase Navigation](#codebase-navigation)
+- [Development Workflows](#development-workflows)
+- [S7 Protocol Domain Knowledge](#s7-protocol-domain-knowledge)
+- [Constraints and Gotchas](#constraints-and-gotchas)
+- [Anti-Patterns](#anti-patterns)
+- [Troubleshooting](#troubleshooting)
+
+---
+
+## High Level Overview
+
+`rust7` is a pure-Rust, zero-external-dependency, synchronous S7 protocol client for Siemens PLCs. It is the spiritual successor to the Snap7 C++ reference implementation — same API shape, same mental model, 100% safe Rust.
+
+The entire library is two source files. `src/client.rs` contains the complete protocol stack: TPKT (RFC 1006) → ISO 8073 / COTP → S7Comm. `src/lib.rs` re-exports the public surface and nothing else.
+
+**Hard architectural constraints — do not violate:**
+- `#![forbid(unsafe_code)]` is enforced at compile time.
+- `[dependencies]` is empty. Zero external crates.
+- Synchronous only (`std::net::TcpStream`). No async, no tokio.
+
+Full API documentation is in `doc/Documentation.md`. Read it before asking questions about method semantics — this file does not repeat it.
+
+---
+
+## Quick Start
+
+```bash
+cargo build
+cargo check   # faster iteration
+cargo test
+```
+
+The `examples/docker/` directory is a **separate Cargo workspace** with its own lockfile. `cargo build` from the project root builds only the library. To build or run the Docker example, `cd examples/docker/` first.
+
+---
+
+## Commands
+
+### Build and Check
+
+```bash
+cargo build
+cargo build --release
+cargo check
+cargo check --tests
+```
+
+### Lint and Format
+
+```bash
+cargo clippy
+cargo fmt
+cargo fmt --check
+```
+
+### Documentation
+
+```bash
+cargo doc --no-deps --open
+```
+
+### Docker Example (from `examples/docker/`)
+
+```bash
+# Start the virtual PLC
+docker compose up -d
+
+# Provision DB2 (required before running the example)
+curl -X POST 'http://localhost:8080/api/DataBlocks?id=2&size=1024' -H 'accept: */*' -d ''
+
+# Run example
+task run
+# or without taskfile:
+cargo run
+
+docker compose down
+```
+
+Requires the `task` CLI (https://taskfile.dev). SoftPLC image: `fbarresi/softplc:latest-linux`. Management UI + Swagger: `http://localhost:8080`. Port 102 = S7 protocol. DB1 exists by default ("Hello, S7!" in first 16 bytes). DB2 must be provisioned via REST before the example runs.
+
+---
+
+## Testing
+
+```bash
+# Run all tests (currently doc-tests only; 0 unit tests)
+cargo test
+```
+
+**Known pre-existing doc-test failures (4):** bare ` ``` ` blocks in doc comments that the test harness tries to compile as Rust. These are doc comment formatting bugs, not API bugs. When writing new doc comments, wrap all prose in ` ```text ` or ` ```ignore ` — never bare ` ``` `.
+
+Do not introduce new doc-test failures.
+
+---
+
+## Codebase Navigation
+
+### File Map
+
+| File | Lines | Role |
+|---|---|---|
+| `src/lib.rs` | 11 | Crate entry. `#![forbid(unsafe_code)]`, embeds README as crate docs, re-exports public surface. Add nothing here without adding to `src/client.rs` first. |
+| `src/client.rs` | 975 | All implementation: constants, macros, `S7Error`, `S7Client`. The full protocol stack. |
+| `Cargo.toml` | 18 | Zero `[dependencies]`. `[lib]` points to `src/lib.rs`. |
+| `doc/Documentation.md` | 516 | Full API reference. Canonical source of truth for method semantics, parameters, and error codes. |
+| `examples/docker/main.rs` | 187 | Standalone binary (separate crate) demonstrating read/write/bit ops against SoftPLC. |
+| `examples/docker/docker-compose.yml` | 10 | Launches SoftPLC on port 102 (S7) and 8080 (REST). |
+| `examples/docker/Taskfile.yml` | 58 | Task runner. Key tasks: `build`, `run`, `docker-up`, `docker-down`, `dev`. |
+| `examples/sdk/client.rs` | 87 | SDK reference: large read (462 bytes, auto-chunks), large write (1024 bytes), bit ops. |
+| `CHANGELOG.md` | 14 | Version history. Follow its format for new entries. |
+
+### Key Files to Understand First
+
+1. `src/client.rs` — everything is here. Read constants first, then `S7Error`, then `connect_tsap`, then `read_area`/`write_area`.
+2. `doc/Documentation.md` — full method reference including connection types, error codes, and field descriptions.
+3. `examples/docker/main.rs` — canonical usage example covering all major operations.
+
+### Common Patterns
+
+- **Connection helpers** (`connect_s71200_1500`, `connect_s7300`, `connect_rack_slot`) — all call `connect_tsap()` after computing TSAP values. Use `connect_rack_slot` as the template for any new helper.
+- **Simplified I/O helpers** (`read_db`, `write_db`, `read_bit`, `write_bit`) — all delegate to `read_area`/`write_area` with fixed `area`/`wordlen`. Use this pattern for any new helper.
+- **Macros** `hi_part!`, `lo_part!`, `make_u16!` — used throughout for byte splitting/assembly. Use them for any new protocol byte manipulation; do not inline the arithmetic.
+- **Error recovery** — low-level errors require `client.disconnect()` before retry. High-level S7 errors (`S7NotFound`, `S7InvalidAddress`) do not.
+
+### Finding Examples
+
+- Adding a connection helper? Reference `connect_rack_slot` in `src/client.rs`.
+- Adding a read/write helper? Reference `read_db` or `read_bit`.
+- Adding a memory area constant? Reference the `S7_AREA_*` block and `check_area()`.
+- Adding an error variant? Reference `S7Error` enum + `impl fmt::Display for S7Error`.
+
+---
+
+## Development Workflows
+
+### Adding a New Memory Area
+
+1. Add `pub const S7_AREA_X: u8 = 0xNN;` near the existing area constants in `src/client.rs`.
+2. Add the constant to the `AREAS` array inside `check_area()`.
+3. Re-export from `src/lib.rs`.
+
+Note: Timer and Counter areas use different word-length encoding in some firmware versions. Verify against actual PLC captures before claiming compatibility.
+
+### Adding a New S7Error Variant
+
+1. Add the variant to the `S7Error` enum.
+2. Add its `Display` arm in `impl fmt::Display for S7Error`.
+3. Fix all exhaustive `match` arms (the compiler will list them).
+4. Return it from the appropriate detection site.
+5. Document it in the relevant method's `### Errors` doc section.
+
+### Adding a New Connection Helper
+
+All helpers call `connect_tsap()`. Compute `local_tsap` and `remote_tsap`, then delegate:
+
+```rust
+pub fn connect_s7400(&mut self, ip: &str, rack: u16, slot: u16) -> Result<(), S7Error> {
+    self.connect_rack_slot(ip, rack, slot)
+}
+```
+
+### Adding a Simplified Read/Write Helper
+
+Wrap `read_area` or `write_area` with fixed `area` and/or `wordlen`:
+
+```rust
+pub fn read_merker(&mut self, start: u16, buffer: &mut [u8]) -> Result<(), S7Error> {
+    self.read_area(S7_AREA_MK, 0, start, S7_WL_BYTE, buffer)
+}
+```
+
+### SCADA Polling Loop
+
+Canonical pattern — keep connection and I/O in the same loop, reconnect on failure:
+
+```rust
+loop {
+    if !client.connected {
+        if let Err(e) = client.connect_s71200_1500("192.168.0.100") {
+            eprintln!("Connection failed: {e}");
+        }
+    }
+    if client.connected {
+        if let Err(e) = do_read_write(&mut client) {
+            eprintln!("I/O error: {e} — disconnecting");
+            client.disconnect();  // reconnect next iteration
+        }
+    }
+    std::thread::sleep(Duration::from_millis(100));
+}
+```
+
+`client.disconnect()` is idempotent and safe to call when already disconnected.
+
+### PR Checklist
+
+- [ ] `cargo build` passes
+- [ ] `cargo clippy` introduces no new warnings (6 pre-existing known warnings — do not add more)
+- [ ] `cargo test` introduces no new doc-test failures (4 pre-existing)
+- [ ] `cargo doc --no-deps` generates cleanly
+- [ ] Any new `pub` item is re-exported from `src/lib.rs`
+- [ ] Any new `S7Error` variant is handled exhaustively in all match arms
+- [ ] `CHANGELOG.md` entry drafted
+
+---
+
+## S7 Protocol Domain Knowledge
+
+### Protocol Layer Stack
+
+```
+Application data
+  └── S7Comm — application layer
+        └── ISO 8073 / COTP — connection-oriented transport
+              └── TPKT (RFC 1006) — TCP transport header
+                    └── TCP/IP — port 102
+```
+
+**TPKT** (bytes 0–3): byte 0 = `0x03` (version), byte 1 = `0x00` (reserved), bytes 2–3 = total frame length (big-endian u16). Every frame starts with these 4 bytes.
+
+**COTP** (bytes 4–6, data phase): `0x02 0xF0 0x80`. Byte 6 = `0x80` = EOT (last/only fragment). Fragmented COTP packets return `IsoFragmentedPacket`.
+
+**S7Comm**: byte 7 = `0x32` (protocol ID), byte 8 = `0x01` (JOB request) or `0x03` (ACK_DATA response), PDU ref at 11–12, param length at 13–14, data length at 15–16.
+
+### Three-Phase Connection Sequence
+
+1. **TCP connect** to `{ip}:102` with the configured connect timeout.
+2. **ISO CR (Connection Request)** — 22-byte COTP telegram with TSAP records. Server replies CC; byte 5 = `0xD0` = success.
+3. **S7 PDU Negotiation** — 25-byte S7Comm requesting 480-byte PDU. Server replies 27 bytes; bytes 25–26 = negotiated PDU size stored in `self.pdu_length`.
+
+### TSAP Addressing
+
+```
+remote_tsap = (conn_type << 8) + (rack * 0x20) + slot
+```
+
+| PLC | rack | slot | remote_tsap (CT_PG=0x01) |
+|---|---|---|---|
+| S7-1200 / S7-1500 | 0 | 0 | `0x0100` |
+| S7-300 | 0 | 2 | `0x0102` |
+| S7-400 / WinAC | hardware config | hardware config | computed |
+| LOGO! / S7-200 | — | — | use `connect_tsap()` directly |
+
+Local TSAP is always `0x0100` for the client.
+
+### PDU Mechanics and Chunking
+
+- Read payload capacity: `pdu_length - 18` → `self.max_rd_pdu_data` (see `src/client.rs:474`)
+- Write payload capacity: `pdu_length - 28` → `self.max_wr_pdu_data` (see `src/client.rs:475`)
+- Typical negotiated PDU = 480 bytes → max single-chunk read = 462 bytes, write = 452 bytes
+- Auto-chunking in the `while offset < datasize` loops in `read_area`/`write_area`
+- `client.chunks` = number of PDU round-trips in the last operation
+
+### Memory Areas
+
+| Constant | Value | PLC Notation | Description |
+|---|---|---|---|
+| `S7_AREA_PE` | `0x81` | I / E | Process Inputs — refreshed from physical inputs each OB1 cycle |
+| `S7_AREA_PA` | `0x82` | Q / A | Process Outputs — written to physical outputs at end of OB1 |
+| `S7_AREA_MK` | `0x83` | M | Merkers / Flags — internal memory, not mapped to I/O |
+| `S7_AREA_DB` | `0x84` | DB | Data Blocks — most common for SCADA/MES integration |
+
+### Bit Addressing Formula
+
+The S7 address field is a 24-bit **bit** address. For byte access the library shifts: `byte_offset << 3`. For direct bit access:
+
+```
+start = byte_num * 8 + bit_idx
+```
+
+Example: `DB100.DBX 45.3` → `start = 45 * 8 + 3 = 363`. The helpers `read_bit`/`write_bit` compute this internally.
+
+### PLC Families Quick Reference
+
+| Family | Method | Rack | Slot | Notes |
+|---|---|---|---|---|
+| S7-1200 | `connect_s71200_1500()` | 0 | 0 | Disable "optimized block access" for byte-level reads |
+| S7-1500 | `connect_s71200_1500()` | 0 | 0 | Optimized DB on by default — must disable in TIA Portal |
+| S7-300 | `connect_s7300()` | 0 | 2 | Step 7 Classic or TIA |
+| S7-400 | `connect_rack_slot()` | varies | varies | Rack/slot from hardware configuration |
+| WinAC / PLCSIM | `connect_rack_slot()` | 0 | varies | PLCSIM exposes virtual rack 0 |
+| LOGO! | `connect_tsap()` | — | — | TSAP from LOGO! Soft Comfort |
+| S7-200 | `connect_tsap()` | — | — | Legacy; Micro/WIN specific TSAPs |
+| Sinamics | `connect_rack_slot()` | varies | varies | CU320/CU340 via PROFINET |
+
+---
+
+## Constraints and Gotchas
+
+**Optimized Data Blocks (S7-1500 default):**
+Reads return `S7Error::S7InvalidAddress` (response code `0x05`). Fix in TIA Portal: DB properties → uncheck "Optimized block access." Hardware configuration issue, not a library bug.
+
+**`client.connected` is a cached flag, not a network probe:**
+Stays `true` after a cable disconnect. The error only surfaces on the next I/O call.
+
+**Error recovery — disconnect before retry:**
+`S7Error::Io`, `IsoInvalidHeader`, `IsoFragmentedPacket`, `IsoInvalidTelegram` → call `disconnect()` immediately. The ISO layer is stateful; a mid-stream error leaves both sides inconsistent. Reconnect from scratch.
+`S7NotFound`, `S7InvalidAddress` → TCP connection is still valid; no disconnect needed.
+
+**Port 102 on Linux requires elevated privileges:**
+Ports below 1024 need `sudo`, `setcap cap_net_bind_service=+ep`, or NAT forwarding. Use `set_connection_port()` if redirecting.
+
+**Bit read performance:**
+Each `read_bit` = one full PDU round-trip (~1ms). To monitor multiple bits in nearby bytes, use `read_db` and extract with bitwise ops in Rust — reduces round-trips by a factor of 8+.
+
+**Timeout defaults:**
+Connect 3000ms, Read 1000ms, Write 500ms. Managed switches with spanning-tree may delay first connection up to 30 seconds. Use `set_timeout()` before connecting.
+
+**Writing to `S7_AREA_PA`:**
+Lands in the output process image, but OB1 re-copies its own output assignments to the image at the end of each scan. Write is silently overwritten on the next cycle unless the output is unassigned in the PLC program.
+
+**Known clippy warnings (6 pre-existing):**
+1. `new_without_default` — `S7Client::new` should impl `Default`
+2. `manual_range_contains` — in `set_connection_type`
+3. `let_unit_value` × 2 — in `read_area` and `write_area`
+4. `doc_lazy_continuation` — in `write_area` doc comment
+5. `unnecessary_mut_passed` — in `write_bit`
+
+If fixing, fix all 6 in one commit.
+
+---
+
+## Anti-Patterns
+
+- Never `unwrap()` on `self.stream.as_mut()` outside the `self.connected` guard — that guard is the safety invariant.
+- Never add `Clone` or `Copy` to `S7Client` — it wraps `TcpStream`.
+- Never manually implement `Send`/`Sync` — thread safety is the caller's responsibility.
+- Never propose connection pooling inside this library — single-connection by design.
+- Never write to `S7_AREA_PE` — it is the read-only input image, overwritten by hardware each scan.
+- Never change `READ_RES_LEN` or `WRITE_RES_LEN` without a Wireshark/S7 trace — wrong values cause silent data corruption.
+- `impl Default for S7Client` must delegate to `S7Client::new()`.
+
+---
+
+## Troubleshooting
+
+**`S7Error::S7InvalidAddress` on DB reads from S7-1500:**
+The DB is in optimized mode. Go to TIA Portal → DB properties → uncheck "Optimized block access."
+
+**Connection succeeds but reads return garbage:**
+Check that `db_number`, `start`, and buffer size match what is actually configured in the PLC. The PLC does not validate that you are reading a meaningful address range.
+
+**`S7Error::Io` during normal operation:**
+Network interruption or PLC reset. Call `client.disconnect()` then reconnect. Do not retry on the same connection.
+
+**`PduNegotiationFailed`:**
+The PLC rejected the PDU negotiation. The PLC may be at capacity (too many concurrent S7 connections). Check how many active connections the PLC is configured to allow in TIA Portal under CPU properties.
+
+**Connection to PLCSIM fails:**
+PLCSIM exposes rack 0 but the slot number depends on the PLCSIM version. Try `connect_rack_slot("127.0.0.1", 0, 0)` and `connect_rack_slot("127.0.0.1", 0, 1)`.
+
+**Port 102 permission denied on Linux:**
+Run with `sudo`, or: `sudo setcap cap_net_bind_service=+ep ./target/debug/your_binary`.
+
+**Slow `cargo build`:**
+Use `cargo check` for correctness checks. The library has no proc macros or heavy dependencies — first build is fast relative to most Rust projects.
+
+**Debugging packet-level issues:**
+Use Wireshark with the `s7comm` dissector (built into recent Wireshark versions). Filter: `s7comm`. Compare captures against the byte arrays constructed in `connect_tsap`, `read_area`, and `write_area` in `src/client.rs`.
+
+---
+
+## Protocol Validator Sub-Agent
+
+When making changes to byte-level telegram construction in `connect_tsap`, `read_area`, or `write_area`, or when adding protocol offset constants or memory area/word-length constants — invoke the protocol validator sub-agent at `.claude/agents/protocol-validator.md`. It reads the code and produces a field-by-field PASS/FAIL validation report. It makes no edits.
