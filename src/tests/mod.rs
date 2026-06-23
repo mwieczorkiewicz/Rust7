@@ -6,3 +6,4 @@ mod error_display;
 mod iso_validation;
 mod macros;
 mod not_connected;
+mod szl;
