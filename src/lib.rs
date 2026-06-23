@@ -2,6 +2,7 @@
 #![doc = include_str!("../README.md")]
 
 pub mod client;
+mod diag_events;
 
 pub use client::{
     CpuInfo,
@@ -27,3 +28,5 @@ pub use client::{
     S7_WL_BIT,
     S7_WL_BYTE,
 };
+
+pub use diag_events::{describe_event, DiagEventInfo};

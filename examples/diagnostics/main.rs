@@ -9,7 +9,7 @@
 //! Note: fbarresi/softplc does not implement ROSCTR 0x07 (Userdata) / SZL.
 //! Against a real PLC all three operations below succeed.
 
-use rust7::{S7Client, S7_SZL_CPU_ID};
+use rust7::{describe_event, S7Client, S7_SZL_CPU_ID};
 
 fn print_separator() {
     println!("{}", "-".repeat(60));
@@ -99,9 +99,15 @@ fn main() {
                         ),
                         None => "(invalid timestamp)".to_string(),
                     };
+                    let ev = describe_event(entry.event_id);
                     println!(
                         "  [{:>3}] event=0x{:04X}  ts={}  info={:02X?}",
                         i, entry.event_id, ts, entry.info
+                    );
+                    println!(
+                        "         class={}{}",
+                        ev.class,
+                        ev.name.map(|n| format!("  name={n}")).unwrap_or_default()
                     );
                 }
             }
