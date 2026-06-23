@@ -9,19 +9,25 @@ use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
 use std::time::Instant;
 
-// Connection types
-pub const CT_PG: u16 = 0x0001; // As PG (Default)
-pub const CT_OP: u16 = 0x0002; // As OP
-pub const CT_S7: u16 = 0x0003; // AS S7 Basic
+/// Connection type: programming device (PG). Default; works for all PLC families.
+pub const CT_PG: u16 = 0x0001;
+/// Connection type: operator panel / HMI (OP).
+pub const CT_OP: u16 = 0x0002;
+/// Connection type: S7 Basic (generic S7 device).
+pub const CT_S7: u16 = 0x0003;
 
-// Areas
-pub const S7_AREA_PE: u8 = 0x81; // Process Inputs
-pub const S7_AREA_PA: u8 = 0x82; // Process Outputs
-pub const S7_AREA_MK: u8 = 0x83; // Merkers
-pub const S7_AREA_DB: u8 = 0x84; // Data Block
+/// Memory area: Process Inputs (PLC notation `I` / `E`). Read-only; refreshed from physical inputs each scan cycle.
+pub const S7_AREA_PE: u8 = 0x81;
+/// Memory area: Process Outputs (PLC notation `Q` / `A`). Written to physical outputs at end of each scan cycle.
+pub const S7_AREA_PA: u8 = 0x82;
+/// Memory area: Merkers / Flags (PLC notation `M`). Internal bit-addressable memory, not mapped to I/O.
+pub const S7_AREA_MK: u8 = 0x83;
+/// Memory area: Data Block (PLC notation `DB`). Primary target for SCADA and MES integration.
+pub const S7_AREA_DB: u8 = 0x84;
 
-// Wordlen
+/// Word length: single-bit access. Prefer [`S7Client::read_bit`] / [`S7Client::write_bit`] over passing this directly.
 pub const S7_WL_BIT: u8 = 0x01;
+/// Word length: byte access. Use for all byte-array reads and writes.
 pub const S7_WL_BYTE: u8 = 0x02;
 
 // Transport
@@ -48,9 +54,7 @@ const RW_RES_OFFSET: usize = 14;
 
 /// Operation successful
 const RES_SUCCESS: u8 = 0xFF;
-/// Invalid Address requested
-/// - Trying to read beyond the limits
-/// - The DB is optimizad
+/// Invalid address: read/write beyond the area limits, or the DB uses optimized access.
 const RES_INVALID_ADDRESS: u8 = 0x05;
 /// Resource not found
 /// - The DB doesn't exists in the CPU
@@ -98,22 +102,43 @@ macro_rules! make_u16 {
     };
 }
 
+/// Errors returned by [`S7Client`] operations.
+///
+/// **Low-level errors** (`Io`, `Iso*`, `TcpConnectionFailed`, `ConnectionClosed`,
+/// `PduNegotiationFailed`) mean the TCP/ISO layer is broken — call [`S7Client::disconnect`]
+/// before retrying. **High-level errors** (`S7NotFound`, `S7InvalidAddress`, `S7Unspecified`,
+/// `SzlReadFailed`) mean the PLC rejected the request but the connection is still usable.
 #[derive(Debug)]
 pub enum S7Error {
+    /// Underlying OS network I/O error.
     Io(io::Error),
+    /// Called while not connected; use a `connect_*` method first.
     NotConnected,
+    /// Could not open a TCP connection to the PLC.
     TcpConnectionFailed,
+    /// PLC closed the TCP connection unexpectedly.
     ConnectionClosed,
+    /// TCP connected but the ISO-on-TCP (COTP) handshake was rejected.
     IsoConnectionFailed,
+    /// Received a fragmented ISO packet; the library expects complete frames only.
     IsoFragmentedPacket,
+    /// ISO/TPKT header did not match the expected RFC 1006 values.
     IsoInvalidHeader,
+    /// ISO telegram length or content was inconsistent.
     IsoInvalidTelegram,
+    /// S7 PDU size negotiation failed, or the PLC returned an unexpected response.
     PduNegotiationFailed,
+    /// A function parameter was out of range or invalid (unknown area, zero port, `bit_idx` > 7, …).
     InvalidFunParameter,
+    /// Resource not found on the PLC (e.g. a Data Block that does not exist).
     S7NotFound,
+    /// Invalid address: read/write beyond the Data Block limits, or the DB uses optimized access.
     S7InvalidAddress,
+    /// The PLC returned an unrecognised error code.
     S7Unspecified,
+    /// SZL read returned a non-success data return code from the PLC.
     SzlReadFailed,
+    /// Catch-all error with a descriptive message.
     Other(String),
 }
 
@@ -166,46 +191,91 @@ pub struct Szl {
     pub data: Vec<u8>,
 }
 
-/// Zero-dependency decoded Siemens `DATE_AND_TIME` (8-byte BCD timestamp).
+/// Decoded Siemens `DATE_AND_TIME` (8-byte BCD timestamp).
 ///
-/// Corresponds to the S7 `DT` data type. All fields are decoded from BCD.
+/// Corresponds to the S7 `DT` data type. All fields are decoded from BCD and validated;
+/// if any BCD nibble is out of range the containing [`DiagnosticEntry::timestamp`] is `None`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct S7DateTime {
+    /// Full four-digit year (e.g. `2024`).
+    /// BCD values 00–89 are mapped to 2000–2089; 90–99 to 1990–1999.
     pub year: u16,
+    /// Month of year (1–12).
     pub month: u8,
+    /// Day of month (1–31).
     pub day: u8,
+    /// Hour of day (0–23).
     pub hour: u8,
+    /// Minute of hour (0–59).
     pub minute: u8,
+    /// Second of minute (0–59).
     pub second: u8,
-    /// Milliseconds (0–999).
+    /// Milliseconds within the second (0–999).
     pub millisecond: u16,
-    /// Day of week (Siemens convention: 1 = Sunday … 7 = Saturday).
+    /// Day of week using the Siemens convention: 1 = Sunday, 2 = Monday, …, 7 = Saturday.
     pub weekday: u8,
 }
 
 /// One entry from the PLC diagnostic buffer (SZL `0x00A0`).
 ///
-/// Each raw entry is 20 bytes: event ID (2), BCD timestamp (8), info (10).
+/// Each raw entry is 20 bytes on the wire: event ID (2), BCD timestamp (8), info bytes (10).
+/// Entries are returned newest-first, as the PLC orders them.
+///
+/// Pass `event_id` to [`describe_event`](crate::describe_event) to get a human-readable
+/// class and name for the event.
 #[derive(Debug, Clone)]
 pub struct DiagnosticEntry {
-    /// Event identifier.
+    /// Raw 16-bit event identifier. The high nibble (bits 12–15) encodes the event class;
+    /// the lower 12 bits identify the specific event within that class.
     pub event_id: u16,
-    /// Decoded timestamp; `None` if the BCD data contained invalid nibbles.
+    /// Decoded wall-clock timestamp of the event.
+    /// `None` if the 8-byte BCD field contained an invalid nibble (value > 9).
     pub timestamp: Option<S7DateTime>,
-    /// Remaining 10 bytes of the 20-byte record (priority, related info, etc.).
+    /// The remaining 10 bytes of the 20-byte diagnostic record.
+    /// Content is event-specific (priority class, related block number, etc.) and is
+    /// not decoded further by this library.
     pub info: [u8; 10],
 }
 
-/// Decoded component-identification fields from SZL `0x001C` (`S7_SZL_CPU_INFO`).
+/// Decoded component-identification strings from SZL `0x001C` ([`S7_SZL_CPU_INFO`]).
+///
+/// Obtain via [`S7Client::read_cpu_info`].
 #[derive(Debug, Clone, Default)]
 pub struct CpuInfo {
+    /// Short type designation of the module (e.g. `"CPU 1516-3 PN/DP"`).
     pub module_type_name: String,
+    /// User-assigned name of the module, set in TIA Portal project properties.
     pub module_name: String,
+    /// Automation station name — the PLC project name in TIA Portal.
     pub as_name: String,
+    /// Copyright string embedded in the CPU firmware by Siemens.
     pub copyright: String,
+    /// Unique hardware serial number of the CPU module.
     pub serial_number: String,
 }
 
+/// An S7 protocol client for communicating with Siemens PLCs over TCP port 102.
+///
+/// Create one with [`S7Client::new`], optionally call configuration methods
+/// ([`set_timeout`](S7Client::set_timeout), [`set_connection_type`](S7Client::set_connection_type)),
+/// then open a connection with one of the `connect_*` methods. After connecting,
+/// use [`read_db`](S7Client::read_db) / [`write_db`](S7Client::write_db) for byte-level
+/// Data Block access, and [`read_bit`](S7Client::read_bit) / [`write_bit`](S7Client::write_bit)
+/// for individual bits.
+///
+/// # Example
+///
+/// ```no_run
+/// use rust7::{S7Client, S7Error};
+///
+/// let mut client = S7Client::new();
+/// client.connect_s71200_1500("192.168.0.100")?;
+///
+/// let mut buf = [0u8; 10];
+/// client.read_db(1, 0, &mut buf)?;   // read 10 bytes from DB1, starting at byte 0
+/// client.disconnect();
+/// # Ok::<(), S7Error>(())
+/// ```
 pub struct S7Client {
     stream: Option<TcpStream>,
     port: u16,
@@ -213,18 +283,22 @@ pub struct S7Client {
     rd_timeout_ms: u64,
     wr_timeout_ms: u64,
     conn_type: u16,
-    max_rd_pdu_data: u16, // Max Read PDU Payload
-    max_wr_pdu_data: u16, // Max Write PDU Payload
-    /// PDU length negotiated by the CPU
+    max_rd_pdu_data: u16,
+    max_wr_pdu_data: u16,
+    /// PDU size (in bytes) agreed with the PLC during connection setup.
+    /// Typical value is 480. Larger values mean fewer round-trips for big reads/writes.
     pub pdu_length: u16,
-    /// Client connected
-    pub connected: bool,
-    /// ### Last Job time (ms).
+    /// `true` while a TCP connection to the PLC is active.
     ///
-    /// If an error occurred the value will be 0
+    /// This is a cached flag — it does **not** probe the network. It stays `true` after a
+    /// cable disconnect; the error only surfaces on the next read or write call.
+    pub connected: bool,
+    /// Duration of the most recent operation in milliseconds.
+    /// Set to `0.0` when an error occurs before the operation completes.
     pub last_time: f64,
-    /// ### Indicates how many pieces the data to be read or written in the last operation was divided into
-    /// Maybe you need to know it only for extreme tuning
+    /// Number of PDU round-trips used by the most recent read or write operation.
+    /// Values above 1 mean the data was split across multiple S7 PDUs (auto-chunking).
+    /// Useful for performance tuning; ignored in normal usage.
     pub chunks: usize,
 }
 
@@ -524,48 +598,42 @@ impl S7Client {
         Ok(())
     }
 
-    /// ### Connects to the S71200 or S71500 families
+    /// Connects to an S7-1200 or S7-1500 PLC (rack 0, slot 0).
     ///
-    /// This helper method is same as `connect_rack_slot()` with rack=0 and slot=0
     /// ### Parameters
-    /// - `ip`  : PLC IPV4 address.
+    /// - `ip`: PLC IPv4 address (e.g. `"192.168.0.100"`).
     ///
-    /// ---
-    /// For Notes, Return and Errors look at `connect_tsap()`
+    /// ### Errors
+    /// - `S7Error::TcpConnectionFailed`: cannot reach the PLC.
+    /// - `S7Error::IsoConnectionFailed`: ISO handshake rejected.
+    /// - `S7Error::PduNegotiationFailed`: PDU size negotiation failed.
+    /// - `S7Error::Io`: network I/O error.
     ///
     pub fn connect_s71200_1500(&mut self, ip: &str) -> Result<(), S7Error> {
         self.connect_rack_slot(ip, 0, 0)
     }
 
-    /// ### Connects to the S7300 family
+    /// Connects to an S7-300 PLC (rack 0, slot 2).
     ///
-    /// This helper method is same as `connect_rack_slot()` with rack=0 and slot=2
     /// ### Parameters
-    /// - `ip`  : PLC IPV4 address.
+    /// - `ip`: PLC IPv4 address (e.g. `"192.168.0.100"`).
     ///
-    /// ---
-    /// For Notes, Return and Errors look at `connect_tsap()`
+    /// ### Errors
+    /// Same as [`connect_s71200_1500`](S7Client::connect_s71200_1500).
     ///
     pub fn connect_s7300(&mut self, ip: &str) -> Result<(), S7Error> {
         self.connect_rack_slot(ip, 0, 2)
     }
 
-    /// ### Connects to a Siemens PLC/Drive using Rack and Slot
-    ///
-    /// Rack and Slot are Hardware configuration parameters.
-    ///
-    /// For S7300 and S71200/1500 they are fixed, (see `connect_s7300()` and `connect_s71200_1500()` ).
-    ///
-    /// Ultimately, you will need of this method only to connect to S7400, WinAC or other Siemens
-    /// hardware, like Drives, which Rack and Slot can vary.
+    /// Connects to a PLC using an explicit rack and slot (for S7-400, WinAC, PLCSIM, Sinamics).
     ///
     /// ### Parameters
-    /// - `ip` : PLC IPV4 address.
-    /// - `rack` : CPU/CU Rack.
-    /// - `slot` : CPU/CU Slot.
+    /// - `ip`: PLC IPv4 address (e.g. `"192.168.0.100"`).
+    /// - `rack`: Rack number from the hardware configuration.
+    /// - `slot`: Slot number of the CPU/CU within that rack.
     ///
-    /// ---
-    /// For Notes, Return and Errors look at `connect_tsap()`
+    /// ### Errors
+    /// Same as [`connect_s71200_1500`](S7Client::connect_s71200_1500).
     ///
     pub fn connect_rack_slot(&mut self, ip: &str, rack: u16, slot: u16) -> Result<(), S7Error> {
         let local_tsap: u16 = 0x0100;
@@ -573,28 +641,19 @@ impl S7Client {
         self.connect_tsap(ip, local_tsap, remote_tsap)
     }
 
-    /// ### Connects to a Siemens ISO-Hardware using TSAP records
+    /// Connects using explicit TSAP values — the lowest-level connection method.
     ///
-    /// This is the deepest connection method, you will need it only to connect to LOGO! or S7200.
-    /// It's internally called by all other connection methods.
+    /// All other `connect_*` helpers call this internally. Use it directly only for
+    /// LOGO! or S7-200, where the remote TSAP cannot be derived from rack/slot.
     ///
     /// ### Parameters
-    /// - `ip` : PLC IPV4 address.
-    /// - `local_tsap` : Client TSAP.
-    /// - `remote_tsap` : Server TSAP (PLC).
-    ///
-    /// ### Notes
-    /// ```text
-    /// The connection port used is 102 (S7Protocol Port) unless you
-    /// changed it via set_connection_port()
-    /// ```
-    ///
-    /// ### Returns
-    /// `Ok(())` on success, or an `S7Error` on failure.
+    /// - `ip`: PLC IPv4 address (e.g. `"192.168.0.100"`).
+    /// - `local_tsap`: Client-side TSAP (typically `0x0100`).
+    /// - `remote_tsap`: PLC-side TSAP (from LOGO! Soft Comfort or Micro/WIN).
     ///
     /// ### Errors
-    /// - `S7Error::TcpConnectionFailed`: TCP connection could not be established.
-    /// - `S7Error::IsoConnectionFailed`: ISO connection failed
+    /// - `S7Error::TcpConnectionFailed`: cannot open TCP connection.
+    /// - `S7Error::IsoConnectionFailed`: ISO handshake rejected.
     /// - `S7Error::PduNegotiationFailed`: PDU negotiation failed.
     /// - `S7Error::Io`: network I/O error.
     ///
@@ -719,15 +778,11 @@ impl S7Client {
         Ok(())
     }
 
-    /// ### Closes the connection.
+    /// Closes the TCP connection. Safe to call when already disconnected (no-op).
     ///
-    /// Safe to call even if the client is not currently connected.
-    /// After disconnection, calls to read/write will return `S7Error::NotConnected`.
-    ///
-    /// ### Notes
-    /// ```text
-    /// A Client should be disconnected on low-level error (see read_area() and write_area() suggestion)
-    /// ```
+    /// Always call this after a low-level error (`Io`, `IsoInvalidHeader`,
+    /// `IsoFragmentedPacket`, `IsoInvalidTelegram`) before retrying — the ISO layer is
+    /// stateful and the existing socket cannot be recovered.
     ///
     pub fn disconnect(&mut self) {
         if self.connected {
