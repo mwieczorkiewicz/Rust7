@@ -8,6 +8,57 @@
 //!
 //! Note: fbarresi/softplc does not implement ROSCTR 0x07 (Userdata) / SZL.
 //! Against a real PLC all three operations below succeed.
+//!
+//! Sample output (S7-1516-3 PN/DP, abbreviated):
+//!
+//! ```text
+//! rust7 — Diagnostic Buffer Example
+//! ------------------------------------------------------------
+//! Connecting to PLC at 192.168.0.100 ...
+//! Connected
+//! PDU negotiated : 480 bytes
+//! Job time (ms)  : 2.341
+//! ------------------------------------------------------------
+//! Reading CPU info (SZL 0x001C) ...
+//! Success!
+//! Job time (ms)  : 1.823
+//! Chunks         : 1
+//! Module type    : CPU 1516-3 PN/DP
+//! Module name    : PLC_1
+//! AS name        : MY_S7_STATION
+//! Serial number  : S C-E6T37943020
+//! Copyright      : Original Siemens Equipment
+//! ------------------------------------------------------------
+//! Reading raw SZL 0x0011 (CPU identification) ...
+//! Success!
+//! Job time (ms)  : 1.102
+//! Chunks         : 1
+//! SZL header     : length_dr=28 n_dr=3
+//! Payload (84 bytes):
+//!   0000: 00 11 00 01 00 06 43 50 55 20 31 35 31 36 2D 33
+//!   0010: 20 50 4E 2F 44 50 00 00 00 00 00 00 36 45 53 37
+//!   0020: 2D 33 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+//!   0030: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+//!   0040: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+//!   0050: 00 00 00 00
+//! ------------------------------------------------------------
+//! Reading diagnostic buffer (SZL 0x00A0) ...
+//! Success!
+//! Job time (ms)  : 3.471
+//! Chunks         : 1
+//! Entries        : 4
+//!
+//!   [  0] event=0x4302  ts=2024-03-15 10:32:47.000  info=[00, 00, 00, 00]
+//!          class=Mode transitions  name=Mode transition from STARTUP to RUN
+//!   [  1] event=0x4301  ts=2024-03-15 10:32:46.000  info=[00, 00, 00, 00]
+//!          class=Mode transitions  name=Mode transition from STOP to STARTUP
+//!   [  2] event=0x4309  ts=2024-03-15 10:32:45.000  info=[00, 00, 00, 00]
+//!          class=Mode transitions  name=Memory reset started automatically (power on not backed up)
+//!   [  3] event=0x3501  ts=2024-03-15 08:14:02.000  info=[00, 00, 00, 00]
+//!          class=Asynchronous errors  name=Cycle time exceeded
+//! ------------------------------------------------------------
+//! Disconnected
+//! ```
 
 use rust7::{describe_event, S7Client, S7_SZL_CPU_ID};
 
