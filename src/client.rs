@@ -982,3 +982,7 @@ impl Drop for S7Client {
         self.disconnect();
     }
 }
+
+#[cfg(test)]
+#[path = "tests/mod.rs"]
+mod tests;
