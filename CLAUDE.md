@@ -95,10 +95,10 @@ Requires the `task` CLI (https://taskfile.dev). SoftPLC image: `fbarresi/softplc
 ## Testing
 
 ```bash
-# Unit tests (84 tests, no Docker required)
+# Unit tests (115 tests, no Docker required)
 cargo test --lib
 
-# Integration tests (9 tests, requires Docker or Podman)
+# Integration tests (9 non-SZL tests + 5 SZL probe tests; requires Docker or Podman)
 cargo test --test integration
 
 # Full suite (unit + doc + integration)
@@ -115,6 +115,7 @@ Integration tests live in `tests/integration/` and are wired up via `[[test]]` i
 - `tests/integration/common.rs` — `start_softplc()` (incl. socket auto-detection), `provision_db()`, `connect_client()`
 - `tests/integration/connection.rs` — connection lifecycle (connect, PDU negotiation, disconnect, reconnect)
 - `tests/integration/read_write.rs` — `read_db`, `write_db`, `read_bit`, `write_bit`, auto-chunking
+- `tests/integration/szl.rs` — SZL/diagnostic-buffer probe tests (all `#[ignore]`; fbarresi/softplc does not support ROSCTR 0x07)
 
 Do not introduce new doc-test failures.
 
@@ -134,6 +135,7 @@ Do not introduce new doc-test failures.
 | `examples/docker/docker-compose.yml` | 10 | Launches SoftPLC on port 102 (S7) and 8080 (REST). |
 | `examples/docker/Taskfile.yml` | 58 | Task runner. Key tasks: `build`, `run`, `docker-up`, `docker-down`, `dev`. |
 | `examples/sdk/client.rs` | 87 | SDK reference: large read (462 bytes, auto-chunks), large write (1024 bytes), bit ops. |
+| `examples/diagnostics/main.rs` | — | Standalone binary: `read_cpu_info`, raw `read_szl`, and `read_diagnostic_buffer` with formatted output. |
 | `CHANGELOG.md` | 14 | Version history. Follow its format for new entries. |
 | `tests/integration/main.rs` | 3 | Integration test binary root (declared via `[[test]]` in Cargo.toml). |
 | `tests/integration/common.rs` | — | Shared helpers: `start_softplc()`, `provision_db()`, `connect_client()`. |
