@@ -968,7 +968,7 @@ impl S7Client {
     /// - The number of bytes to write will be equal to the size of the buffer passed.
     /// - Large blocks are automatically split into chunks based on the negotiated PDU size.
     /// - Writing the output buffer (`S7_AREA_PA`) usually does not produce useful results, in fact the output process image
-    /// will be rewritten by OB1 in the next round
+    ///   will be rewritten by OB1 in the next round
     ///
     pub fn write_area(
         &mut self,
@@ -1472,6 +1472,12 @@ impl S7Client {
             off += rec_len;
         }
         Ok(info)
+    }
+}
+
+impl Default for S7Client {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
