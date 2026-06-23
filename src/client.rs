@@ -49,14 +49,37 @@ const EOT: u8               = 0x80; // ISO End of Trasmission
 const RW_RES_OFFSET: usize  = 14;
 
 /// Operation successful
-const RES_SUCCESS: u8         = 0xFF; 
+const RES_SUCCESS: u8         = 0xFF;
 /// Invalid Address requested
 /// - Trying to read beyond the limits
 /// - The DB is optimizad
-const RES_INVALID_ADDRESS: u8 = 0x05;  
+const RES_INVALID_ADDRESS: u8 = 0x05;
 /// Resource not found
 /// - The DB doesn't exists in the CPU
-const RES_NOT_FOUND: u8       = 0x0A; 
+const RES_NOT_FOUND: u8       = 0x0A;
+
+// SZL (System Status List) IDs
+/// Module identification (order number, firmware version, PLC type).
+pub const S7_SZL_CPU_ID: u16      = 0x0011;
+/// Component identification (module name, serial number, AS name, copyright).
+pub const S7_SZL_CPU_INFO: u16    = 0x001C;
+/// Diagnostic buffer — the primary diagnostic facility accessible from outside the PLC.
+pub const S7_SZL_DIAG_BUFFER: u16 = 0x00A0;
+/// Current CPU operating mode (RUN / STOP / STARTUP).
+pub const S7_SZL_CPU_STATUS: u16  = 0x0424;
+
+// SZL protocol internals
+const SZL_REQ_LEN: usize         = 33;  // SZL request telegram size (bytes)
+// Offsets within the S7 userdata **response** body (after the 7-byte TPKT/COTP header).
+// S7 userdata response header: 12 bytes (10-byte base + 2 error-class/code bytes).
+// Parameter block: 10 bytes starting at response[12].
+// Data block: starts at response[22].
+// Verified against moka7 / Snap7 (PDU[N] = response[N-7]).
+const SZL_SEQ_DONE_OFFSET: usize = 19; // last param byte: 0x00 = final/only fragment
+const SZL_DATA_RET_OFFSET: usize = 22; // data-block return code (0xFF = ok)
+const SZL_DATA_LEN_OFFSET: usize = 24; // data-block payload length (2 bytes, big-endian)
+const SZL_PAYLOAD_OFFSET: usize  = 26; // start of SZL payload within the data block
+const SZL_MAX_ITER: usize        = 100; // safety cap on the fragment-accumulation loop
 
 // Macros
 macro_rules! hi_part {
@@ -92,6 +115,7 @@ pub enum S7Error {
     S7NotFound,
     S7InvalidAddress,
     S7Unspecified,
+    SzlReadFailed,
     Other(String),
 }
 
@@ -111,6 +135,7 @@ impl fmt::Display for S7Error {
             S7Error::S7NotFound => write!(f, "S7 Resource not found in the CPU"),
             S7Error::S7InvalidAddress => write!(f, "S7 Invalid address"),
             S7Error::S7Unspecified => write!(f, "S7 unspecified error"),
+            S7Error::SzlReadFailed => write!(f, "SZL read failed (non-success data return code)"),
             S7Error::Other(msg) => write!(f, "{}", msg),
         }
     }
@@ -121,6 +146,68 @@ impl From<io::Error> for S7Error {
         S7Error::Io(err)
     }
 }
+
+/// Header fields from an SZL read response.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SzlHeader {
+    /// Byte length of each data record (`LENTHDR`).
+    pub length_dr: u16,
+    /// Total number of data records (`N_DR`), accumulated across all fragments.
+    pub n_dr: u16,
+}
+
+/// Raw result of a [`S7Client::read_szl`] call.
+///
+/// `data` holds the concatenated record bytes from all fragments.
+/// Its length is typically `header.length_dr * header.n_dr`.
+#[derive(Debug, Clone)]
+pub struct Szl {
+    /// Parsed SZL response header.
+    pub header: SzlHeader,
+    /// Concatenated record payload bytes.
+    pub data: Vec<u8>,
+}
+
+/// Zero-dependency decoded Siemens `DATE_AND_TIME` (8-byte BCD timestamp).
+///
+/// Corresponds to the S7 `DT` data type. All fields are decoded from BCD.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct S7DateTime {
+    pub year: u16,
+    pub month: u8,
+    pub day: u8,
+    pub hour: u8,
+    pub minute: u8,
+    pub second: u8,
+    /// Milliseconds (0–999).
+    pub millisecond: u16,
+    /// Day of week (Siemens convention: 1 = Sunday … 7 = Saturday).
+    pub weekday: u8,
+}
+
+/// One entry from the PLC diagnostic buffer (SZL `0x00A0`).
+///
+/// Each raw entry is 20 bytes: event ID (2), BCD timestamp (8), info (10).
+#[derive(Debug, Clone)]
+pub struct DiagnosticEntry {
+    /// Event identifier.
+    pub event_id: u16,
+    /// Decoded timestamp; `None` if the BCD data contained invalid nibbles.
+    pub timestamp: Option<S7DateTime>,
+    /// Remaining 10 bytes of the 20-byte record (priority, related info, etc.).
+    pub info: [u8; 10],
+}
+
+/// Decoded component-identification fields from SZL `0x001C` (`S7_SZL_CPU_INFO`).
+#[derive(Debug, Clone, Default)]
+pub struct CpuInfo {
+    pub module_type_name: String,
+    pub module_name: String,
+    pub as_name: String,
+    pub copyright: String,
+    pub serial_number: String,
+}
+
 pub struct S7Client {
     stream: Option<TcpStream>,
     port: u16,
@@ -183,6 +270,89 @@ pub struct S7Client {
         // Returns the ramaining byte to read from the telegram
         Ok(telegram_length - TPKT_ISO_LEN)
     }
+
+// Builds the 33-byte ROSCTR-0x07 Userdata "first" SZL read request telegram.
+fn build_szl_first_request(szl_id: u16, szl_index: u16) -> [u8; SZL_REQ_LEN] {
+    let mut req: [u8; SZL_REQ_LEN] = [
+        ISO_ID, 0x00,            // TPKT: version, reserved              0
+        0x00, 0x21,              // TPKT: total length = 33              2
+        0x02, 0xF0, EOT,         // COTP: len, PDU type, EOT             4
+        S7_ID, 0x07,             // S7: protocol ID, ROSCTR = Userdata   7
+        0x00, 0x00,              // redundancy id                        9
+        0x11, 0x00,              // PDU reference                        11
+        0x00, 0x08,              // parameter length = 8                 13
+        0x00, 0x08,              // data length = 8                      15
+        // --- Parameter block (8 bytes at 17–24) ---
+        0x00, 0x01, 0x12,        // param header                         17
+        0x04,                    // sub-length = 4                       20
+        0x11,                    // method = request                     21
+        0x44,                    // type=4(req) | group=4(CPU)           22
+        0x01,                    // subfunction = ReadSZL                23
+        0x00,                    // sequence number = 0 (first)          24
+        // --- Data block (8 bytes at 25–32) ---
+        RES_SUCCESS,             // data return code                     25
+        0x09,                    // transport size = OCTET_STRING        26
+        0x00, 0x04,              // data payload length = 4              27
+        0x00, 0x00,              // SZL-ID (filled below)                29
+        0x00, 0x00,              // SZL-INDEX (filled below)             31
+    ];
+    req[29] = hi_part!(szl_id);
+    req[30] = lo_part!(szl_id);
+    req[31] = hi_part!(szl_index);
+    req[32] = lo_part!(szl_index);
+    req
+}
+
+// Builds the 33-byte ROSCTR-0x07 Userdata "next" SZL read request telegram.
+// `seq_num` must echo the sequence number the PLC returned in the previous response.
+fn build_szl_next_request(seq_num: u8) -> [u8; SZL_REQ_LEN] {
+    [
+        ISO_ID, 0x00,            // TPKT: version, reserved              0
+        0x00, 0x21,              // TPKT: total length = 33              2
+        0x02, 0xF0, EOT,         // COTP                                 4
+        S7_ID, 0x07,             // S7: protocol ID, ROSCTR = Userdata   7
+        0x00, 0x00,              // redundancy id                        9
+        0x12, 0x00,              // PDU reference                        11
+        0x00, 0x0C,              // parameter length = 12                13
+        0x00, 0x04,              // data length = 4                      15
+        // --- Parameter block (12 bytes at 17–28) ---
+        0x00, 0x01, 0x12,        // param header                         17
+        0x08,                    // sub-length = 8                       20
+        0x12,                    // method = continuation                21
+        0x44,                    // type/group                           22
+        0x01,                    // subfunction = ReadSZL                23
+        seq_num,                 // PLC sequence number (echo)           24
+        0x00, 0x00, 0x00, 0x00, // padding                              25
+        // --- Data block (4 bytes at 29–32) ---
+        0x0A, 0x00, 0x00, 0x00, //                                      29
+    ]
+}
+
+// Decodes an 8-byte Siemens DATE_AND_TIME (DT) BCD timestamp.
+// Returns None if any BCD nibble is invalid (> 9).
+fn parse_bcd_timestamp(data: &[u8; 8]) -> Option<S7DateTime> {
+    fn bcd(b: u8) -> Option<u8> {
+        let hi = b >> 4;
+        let lo = b & 0x0F;
+        if hi > 9 || lo > 9 { None } else { Some(hi * 10 + lo) }
+    }
+
+    let year_raw = bcd(data[0])?;
+    let year = if year_raw < 90 { 2000u16 + year_raw as u16 } else { 1900u16 + year_raw as u16 };
+    let month = bcd(data[1])?;
+    let day = bcd(data[2])?;
+    let hour = bcd(data[3])?;
+    let minute = bcd(data[4])?;
+    let second = bcd(data[5])?;
+    // Byte 6: BCD tens+units of ms (0-99). Byte 7 high nibble: hundreds of ms (0-9).
+    let ms_lo = bcd(data[6])? as u16;
+    let ms_hi = data[7] >> 4;
+    if ms_hi > 9 { return None; }
+    let millisecond = ms_hi as u16 * 100 + ms_lo;
+    let weekday = data[7] & 0x0F;
+
+    Some(S7DateTime { year, month, day, hour, minute, second, millisecond, weekday })
+}
 
 impl S7Client {
     /// ### Creates a new `S7Client` instance with default settings.
@@ -964,16 +1134,206 @@ impl S7Client {
     /// For further info, please refer to `write_area()`
     /// 
    pub fn write_bit(&mut self, area: u8, db_number: u16, byte_num: u16, bit_idx: u8, value: bool) -> Result<(), S7Error> {
-        
-        if bit_idx > 7 { 
-            return Err(S7Error::InvalidFunParameter); 
+
+        if bit_idx > 7 {
+            return Err(S7Error::InvalidFunParameter);
         }
-  
+
         let start: u16 = byte_num * 8 + bit_idx as u16;
         let mut data = [0u8; 1];
-        data[0] = value as u8;        
-              
+        data[0] = value as u8;
+
         self.write_area(area, db_number, start, S7_WL_BIT, &mut data)
+    }
+
+    // ── SZL (System Status List) ─────────────────────────────────────────────
+
+    // Core SZL read: sends FIRST + optional NEXT telegrams (ROSCTR 0x07 Userdata),
+    // accumulates fragments, returns the raw Szl with header and concatenated records.
+    fn read_szl_block(&mut self, szl_id: u16, szl_index: u16) -> Result<Szl, S7Error> {
+        self.last_time = 0.0;
+        self.chunks = 0;
+
+        if !self.connected {
+            return Err(S7Error::NotConnected);
+        }
+
+        let start_time = Instant::now();
+        let stream = self.stream.as_mut().unwrap();
+
+        let mut records: Vec<u8> = Vec::new();
+        let mut length_dr: u16 = 0;
+        let mut n_dr: u16 = 0;
+        let mut is_first = true;
+        let mut seq_num: u8 = 0;
+
+        for _ in 0..SZL_MAX_ITER {
+            self.chunks += 1;
+
+            let request = if is_first {
+                build_szl_first_request(szl_id, szl_index)
+            } else {
+                build_szl_next_request(seq_num)
+            };
+
+            stream.write_all(&request)?;
+
+            let mut iso_packet = [0u8; TPKT_ISO_LEN];
+            stream.read_exact(&mut iso_packet)?;
+
+            let s7_comm_size = check_iso_packet(self.pdu_length, &mut iso_packet)?;
+
+            // We need at least enough bytes to reach the SZL payload header (FIRST: 34 bytes)
+            if s7_comm_size < SZL_PAYLOAD_OFFSET + 8 {
+                return Err(S7Error::IsoInvalidTelegram);
+            }
+
+            let mut response = [0u8; PDU_LEN_REQ as usize];
+            let size_resp = stream.read(&mut response)?;
+            if size_resp < s7_comm_size {
+                return Err(S7Error::IsoInvalidTelegram);
+            }
+
+            if response[SZL_DATA_RET_OFFSET] != RES_SUCCESS {
+                return Err(S7Error::SzlReadFailed);
+            }
+
+            let payload_len = make_u16!(response[SZL_DATA_LEN_OFFSET], response[SZL_DATA_LEN_OFFSET + 1]) as usize;
+            let payload_end = (SZL_PAYLOAD_OFFSET + payload_len).min(size_resp);
+
+            if is_first {
+                // FIRST response SZL payload layout:
+                //   [0..2]  SZL-ID
+                //   [2..4]  SZL-INDEX
+                //   [4..6]  LENTHDR (bytes per record)
+                //   [6..8]  N_DR (total record count across all fragments)
+                //   [8..]   records
+                if payload_end < SZL_PAYLOAD_OFFSET + 8 {
+                    return Err(S7Error::IsoInvalidTelegram);
+                }
+                length_dr = make_u16!(response[SZL_PAYLOAD_OFFSET + 4], response[SZL_PAYLOAD_OFFSET + 5]);
+                n_dr = make_u16!(response[SZL_PAYLOAD_OFFSET + 6], response[SZL_PAYLOAD_OFFSET + 7]);
+                let rec_start = SZL_PAYLOAD_OFFSET + 8;
+                if rec_start < payload_end {
+                    records.extend_from_slice(&response[rec_start..payload_end]);
+                }
+            } else {
+                // NEXT response SZL payload layout:
+                //   [0..2]  LENTHDR (repeat)
+                //   [2..4]  N_DR of this fragment
+                //   [4..]   records
+                let rec_start = SZL_PAYLOAD_OFFSET + 4;
+                if rec_start < payload_end {
+                    records.extend_from_slice(&response[rec_start..payload_end]);
+                }
+            }
+
+            // Byte at SZL_SEQ_DONE_OFFSET: 0x00 = last/only fragment; non-zero = more to come.
+            let done_byte = response[SZL_SEQ_DONE_OFFSET];
+            if done_byte == 0x00 {
+                break;
+            }
+            seq_num = done_byte;
+            is_first = false;
+        }
+
+        self.last_time = start_time.elapsed().as_secs_f64() * 1000.0;
+
+        Ok(Szl { header: SzlHeader { length_dr, n_dr }, data: records })
+    }
+
+    /// ### Reads a raw SZL (System Status List) block from the PLC.
+    ///
+    /// SZL reads use ROSCTR `0x07` (Userdata), which is a separate protocol path from
+    /// normal data-area reads. Multi-fragment responses are handled automatically.
+    ///
+    /// ### Parameters
+    /// - `szl_id`: SZL list identifier (e.g. `S7_SZL_DIAG_BUFFER`, `S7_SZL_CPU_INFO`).
+    /// - `szl_index`: SZL index (usually `0` for the complete list).
+    ///
+    /// ### Returns
+    /// `Ok(Szl)` containing the raw record bytes and the parsed header.
+    ///
+    /// ### Errors
+    /// - `S7Error::NotConnected`: client not connected.
+    /// - `S7Error::SzlReadFailed`: PLC returned a non-success data return code.
+    /// - `S7Error::IsoInvalidTelegram`, `S7Error::IsoInvalidHeader`, `S7Error::IsoFragmentedPacket`: protocol errors.
+    /// - `S7Error::Io`: network I/O error.
+    ///
+    /// ### Suggestion
+    /// On low-level errors, disconnect and reconnect before retrying.
+    ///
+    pub fn read_szl(&mut self, szl_id: u16, szl_index: u16) -> Result<Szl, S7Error> {
+        self.read_szl_block(szl_id, szl_index)
+    }
+
+    /// ### Reads and decodes the PLC diagnostic buffer (SZL `0x00A0`).
+    ///
+    /// Returns entries newest-first, as the PLC orders them. Each entry is 20 bytes:
+    /// event ID (2), BCD timestamp (8), info bytes (10).
+    ///
+    /// ### Returns
+    /// `Ok(Vec<DiagnosticEntry>)` — decoded diagnostic entries.
+    ///
+    /// ### Errors
+    /// Same as [`read_szl`](S7Client::read_szl).
+    ///
+    pub fn read_diagnostic_buffer(&mut self) -> Result<Vec<DiagnosticEntry>, S7Error> {
+        let szl = self.read_szl_block(S7_SZL_DIAG_BUFFER, 0)?;
+        const ENTRY_LEN: usize = 20;
+        let mut entries = Vec::new();
+        let mut off = 0;
+        while off + ENTRY_LEN <= szl.data.len() {
+            let rec = &szl.data[off..off + ENTRY_LEN];
+            let event_id = make_u16!(rec[0], rec[1]);
+            let mut ts_bytes = [0u8; 8];
+            ts_bytes.copy_from_slice(&rec[2..10]);
+            let timestamp = parse_bcd_timestamp(&ts_bytes);
+            let mut info = [0u8; 10];
+            info.copy_from_slice(&rec[10..20]);
+            entries.push(DiagnosticEntry { event_id, timestamp, info });
+            off += ENTRY_LEN;
+        }
+        Ok(entries)
+    }
+
+    /// ### Reads component-identification strings from SZL `0x001C`.
+    ///
+    /// Returns a [`CpuInfo`] with the module type name, module name, AS name,
+    /// copyright string, and serial number, trimmed of null/whitespace padding.
+    ///
+    /// ### Errors
+    /// Same as [`read_szl`](S7Client::read_szl). Also returns `S7Error::SzlReadFailed`
+    /// if the returned record length is too short to contain an index field.
+    ///
+    pub fn read_cpu_info(&mut self) -> Result<CpuInfo, S7Error> {
+        let szl = self.read_szl_block(S7_SZL_CPU_INFO, 0)?;
+        let rec_len = szl.header.length_dr as usize;
+        if rec_len < 4 {
+            return Err(S7Error::SzlReadFailed);
+        }
+        let mut info = CpuInfo::default();
+        let mut off = 0;
+        while off + rec_len <= szl.data.len() {
+            let rec = &szl.data[off..off + rec_len];
+            let idx = make_u16!(rec[0], rec[1]);
+            let text: String = String::from_utf8_lossy(&rec[2..])
+                .chars()
+                .take_while(|&c| c != '\0')
+                .collect::<String>()
+                .trim_end()
+                .to_string();
+            match idx {
+                1 => info.module_type_name = text,
+                2 => info.module_name = text,
+                3 => info.as_name = text,
+                6 => info.copyright = text,
+                7 => info.serial_number = text,
+                _ => {}
+            }
+            off += rec_len;
+        }
+        Ok(info)
     }
 }
 
