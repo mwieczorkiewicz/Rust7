@@ -124,6 +124,61 @@ fn read_cpu_info_returns_some_strings() {
 }
 
 #[test]
+fn read_work_memory_returns_records() {
+    let container = common::start_softplc();
+    let s7_port = container
+        .get_host_port_ipv4(102)
+        .expect("port 102 not mapped");
+    let mut client = common::connect_client(s7_port);
+
+    match client.read_work_memory() {
+        Ok(records) => {
+            println!("Work memory: {} records", records.len());
+            for r in &records {
+                println!(
+                    "  index={:#06X} area_type={:#06X} total={} used={}",
+                    r.index, r.area_type, r.total_bytes, r.used_bytes
+                );
+            }
+        }
+        Err(e) => panic!("read_work_memory failed: {e}"),
+    }
+}
+
+#[test]
+#[ignore = "fbarresi/softplc returns IsoInvalidTelegram for SZL 0x0194 — test against a real PLC"]
+fn read_cycle_time_returns_info() {
+    let container = common::start_softplc();
+    let s7_port = container
+        .get_host_port_ipv4(102)
+        .expect("port 102 not mapped");
+    let mut client = common::connect_client(s7_port);
+
+    match client.read_cycle_time() {
+        Ok(ct) => {
+            println!(
+                "Cycle time: count={} min={:.1}ms max={:.1}ms current={:.1}ms",
+                ct.ob1_count, ct.min_ms, ct.max_ms, ct.current_ms
+            );
+            // All times must be non-negative
+            assert!(ct.min_ms >= 0.0);
+            assert!(ct.max_ms >= 0.0);
+            assert!(ct.current_ms >= 0.0);
+            // min <= max (unless PLC is in STOP and all are zero)
+            if ct.max_ms > 0.0 {
+                assert!(
+                    ct.min_ms <= ct.max_ms,
+                    "min_ms ({}) > max_ms ({})",
+                    ct.min_ms,
+                    ct.max_ms
+                );
+            }
+        }
+        Err(e) => panic!("read_cycle_time failed: {e}"),
+    }
+}
+
+#[test]
 #[ignore = "probe: fbarresi/softplc SZL support is unverified — run manually to check"]
 fn read_szl_sets_last_time_and_chunks() {
     let container = common::start_softplc();

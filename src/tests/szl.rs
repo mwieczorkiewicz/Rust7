@@ -2,9 +2,24 @@
 use super::super::{
     build_szl_first_request, build_szl_next_request, parse_bcd_timestamp, SZL_REQ_LEN,
 };
-use crate::{CpuInfo, S7Client, S7DateTime, S7Error, Szl, SzlHeader};
+use crate::{CpuInfo, CycleTimeInfo, S7Client, S7DateTime, S7Error, Szl, SzlHeader, WorkMemoryRecord};
 
 // ── read_szl guard tests ─────────────────────────────────────────────────────
+
+#[test]
+fn read_work_memory_not_connected() {
+    let mut c = S7Client::new();
+    assert!(matches!(
+        c.read_work_memory(),
+        Err(S7Error::NotConnected)
+    ));
+}
+
+#[test]
+fn read_cycle_time_not_connected() {
+    let mut c = S7Client::new();
+    assert!(matches!(c.read_cycle_time(), Err(S7Error::NotConnected)));
+}
 
 #[test]
 fn read_szl_not_connected() {
@@ -32,8 +47,10 @@ fn read_cpu_info_not_connected() {
 #[test]
 fn szl_id_constants_have_expected_values() {
     assert_eq!(crate::S7_SZL_CPU_ID, 0x0011);
+    assert_eq!(crate::S7_SZL_WORK_MEMORY, 0x0013);
     assert_eq!(crate::S7_SZL_CPU_INFO, 0x001C);
     assert_eq!(crate::S7_SZL_DIAG_BUFFER, 0x00A0);
+    assert_eq!(crate::S7_SZL_CYCLE_TIME, 0x0194);
     assert_eq!(crate::S7_SZL_CPU_STATUS, 0x0424);
 }
 
@@ -364,6 +381,136 @@ fn cpu_info_unknown_index_ignored() {
     let info = decode_cpu_info(&szl);
     assert_eq!(info.module_type_name, "Known");
     assert!(info.serial_number.is_empty());
+}
+
+// ── WorkMemoryRecord decoder (exercised without a network connection) ──────────
+
+fn decode_work_memory(szl: &Szl) -> Vec<WorkMemoryRecord> {
+    let rec_len = szl.header.length_dr as usize;
+    let mut records = Vec::new();
+    let mut off = 0;
+    while off + rec_len <= szl.data.len() {
+        let rec = &szl.data[off..off + rec_len];
+        if rec.len() >= 12 {
+            records.push(WorkMemoryRecord {
+                index:       ((rec[0] as u16) << 8) | rec[1] as u16,
+                area_type:   ((rec[2] as u16) << 8) | rec[3] as u16,
+                total_bytes: u32::from_be_bytes([rec[4], rec[5], rec[6], rec[7]]),
+                used_bytes:  u32::from_be_bytes([rec[8], rec[9], rec[10], rec[11]]),
+            });
+        }
+        off += rec_len;
+    }
+    records
+}
+
+fn make_work_memory_record(index: u16, area_type: u16, total: u32, used: u32, rec_len: usize) -> Vec<u8> {
+    let mut rec = vec![0u8; rec_len];
+    rec[0] = (index >> 8) as u8;
+    rec[1] = (index & 0xFF) as u8;
+    rec[2] = (area_type >> 8) as u8;
+    rec[3] = (area_type & 0xFF) as u8;
+    rec[4..8].copy_from_slice(&total.to_be_bytes());
+    rec[8..12].copy_from_slice(&used.to_be_bytes());
+    rec
+}
+
+#[test]
+fn work_memory_parse_single_record() {
+    const RL: usize = 34;
+    let data = make_work_memory_record(0x0001, 0x0003, 0x00080000, 0x00012345, RL);
+    let szl = Szl {
+        header: SzlHeader { length_dr: RL as u16, n_dr: 1 },
+        data,
+    };
+    let records = decode_work_memory(&szl);
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].index, 0x0001);
+    assert_eq!(records[0].area_type, 0x0003);
+    assert_eq!(records[0].total_bytes, 0x00080000);
+    assert_eq!(records[0].used_bytes, 0x00012345);
+}
+
+#[test]
+fn work_memory_parse_multiple_records() {
+    const RL: usize = 34;
+    let mut data = Vec::new();
+    data.extend(make_work_memory_record(0x0001, 0x0001, 100_000, 40_000, RL));
+    data.extend(make_work_memory_record(0x0002, 0x0002, 200_000, 80_000, RL));
+    data.extend(make_work_memory_record(0x0003, 0x0004,  50_000, 10_000, RL));
+    let szl = Szl {
+        header: SzlHeader { length_dr: RL as u16, n_dr: 3 },
+        data,
+    };
+    let records = decode_work_memory(&szl);
+    assert_eq!(records.len(), 3);
+    assert_eq!(records[1].total_bytes, 200_000);
+    assert_eq!(records[2].used_bytes, 10_000);
+}
+
+#[test]
+fn work_memory_empty_data_returns_empty_vec() {
+    let szl = Szl {
+        header: SzlHeader { length_dr: 34, n_dr: 0 },
+        data: vec![],
+    };
+    assert!(decode_work_memory(&szl).is_empty());
+}
+
+#[test]
+fn work_memory_short_record_skipped() {
+    // rec_len = 34, but only 11 bytes supplied — guard `rec.len() >= 12` skips it
+    let szl = Szl {
+        header: SzlHeader { length_dr: 34, n_dr: 1 },
+        data: vec![0u8; 11],
+    };
+    assert!(decode_work_memory(&szl).is_empty());
+}
+
+// ── CycleTimeInfo decoder (exercised without a network connection) ─────────────
+
+fn decode_cycle_time(data: &[u8]) -> Result<CycleTimeInfo, S7Error> {
+    if data.len() < 18 {
+        return Err(S7Error::IsoInvalidTelegram);
+    }
+    Ok(CycleTimeInfo {
+        ob1_count:  u32::from_be_bytes([data[2], data[3], data[4], data[5]]),
+        min_ms:     u32::from_be_bytes([data[6],  data[7],  data[8],  data[9]])  as f64 / 10.0,
+        max_ms:     u32::from_be_bytes([data[10], data[11], data[12], data[13]]) as f64 / 10.0,
+        current_ms: u32::from_be_bytes([data[14], data[15], data[16], data[17]]) as f64 / 10.0,
+    })
+}
+
+#[test]
+fn cycle_time_parse_known_values() {
+    // index=0x0001, count=42, min=500 (50.0ms), max=1200 (120.0ms), current=600 (60.0ms)
+    let mut data = vec![0u8; 28];
+    data[0] = 0x00; data[1] = 0x01;             // index
+    data[2..6].copy_from_slice(&42u32.to_be_bytes());   // ob1_count
+    data[6..10].copy_from_slice(&500u32.to_be_bytes()); // min (0.1ms units)
+    data[10..14].copy_from_slice(&1200u32.to_be_bytes()); // max
+    data[14..18].copy_from_slice(&600u32.to_be_bytes());  // current
+    let ct = decode_cycle_time(&data).expect("valid cycle time");
+    assert_eq!(ct.ob1_count, 42);
+    assert!((ct.min_ms - 50.0).abs() < f64::EPSILON);
+    assert!((ct.max_ms - 120.0).abs() < f64::EPSILON);
+    assert!((ct.current_ms - 60.0).abs() < f64::EPSILON);
+}
+
+#[test]
+fn cycle_time_zero_values_are_valid() {
+    let data = vec![0u8; 28];
+    let ct = decode_cycle_time(&data).expect("all-zero is valid");
+    assert_eq!(ct.ob1_count, 0);
+    assert_eq!(ct.min_ms, 0.0);
+}
+
+#[test]
+fn cycle_time_data_too_short_returns_error() {
+    assert!(matches!(
+        decode_cycle_time(&[0u8; 17]),
+        Err(S7Error::IsoInvalidTelegram)
+    ));
 }
 
 #[test]

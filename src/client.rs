@@ -63,10 +63,14 @@ const RES_NOT_FOUND: u8 = 0x0A;
 // SZL (System Status List) IDs
 /// Module identification (order number, firmware version, PLC type).
 pub const S7_SZL_CPU_ID: u16 = 0x0011;
+/// Work memory information — total and used byte counts per memory area.
+pub const S7_SZL_WORK_MEMORY: u16 = 0x0013;
 /// Component identification (module name, serial number, AS name, copyright).
 pub const S7_SZL_CPU_INFO: u16 = 0x001C;
 /// Diagnostic buffer — the primary diagnostic facility accessible from outside the PLC.
 pub const S7_SZL_DIAG_BUFFER: u16 = 0x00A0;
+/// Cycle time statistics — OB1 min, max, and current scan cycle times.
+pub const S7_SZL_CYCLE_TIME: u16 = 0x0194;
 /// Current CPU operating mode (RUN / STOP / STARTUP).
 pub const S7_SZL_CPU_STATUS: u16 = 0x0424;
 
@@ -252,6 +256,41 @@ pub struct CpuInfo {
     pub copyright: String,
     /// Unique hardware serial number of the CPU module.
     pub serial_number: String,
+}
+
+/// One memory area record from SZL `0x0013` ([`S7_SZL_WORK_MEMORY`]).
+///
+/// Obtain via [`S7Client::read_work_memory`].
+///
+/// Byte layout is derived from the Siemens S7 System and Standard Functions reference manual.
+/// Validate with a Wireshark capture when switching CPU families.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WorkMemoryRecord {
+    /// Area identifier as reported by the PLC.
+    pub index: u16,
+    /// Area type code; encoding is CPU-family specific.
+    pub area_type: u16,
+    /// Total size of this memory area in bytes.
+    pub total_bytes: u32,
+    /// Currently used bytes in this memory area.
+    pub used_bytes: u32,
+}
+
+/// Scan cycle time statistics from SZL `0x0194` ([`S7_SZL_CYCLE_TIME`]).
+///
+/// All times are in milliseconds. The PLC stores them in units of 0.1 ms internally.
+///
+/// Obtain via [`S7Client::read_cycle_time`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CycleTimeInfo {
+    /// Number of OB1 executions since the last CPU startup.
+    pub ob1_count: u32,
+    /// Minimum scan cycle time in milliseconds since the last CPU startup.
+    pub min_ms: f64,
+    /// Maximum scan cycle time in milliseconds since the last CPU startup.
+    pub max_ms: f64,
+    /// Most recently completed scan cycle time in milliseconds.
+    pub current_ms: f64,
 }
 
 /// An S7 protocol client for communicating with Siemens PLCs over TCP port 102.
@@ -1527,6 +1566,61 @@ impl S7Client {
             off += rec_len;
         }
         Ok(info)
+    }
+
+    /// ### Reads work memory information from SZL `0x0013`.
+    ///
+    /// Returns one [`WorkMemoryRecord`] per memory area reported by the PLC.
+    /// Typical S7-300/400 PLCs return 3 records (code, data, and retentive areas).
+    ///
+    /// ### Errors
+    /// Same as [`read_szl`](S7Client::read_szl).
+    ///
+    pub fn read_work_memory(&mut self) -> Result<Vec<WorkMemoryRecord>, S7Error> {
+        let szl = self.read_szl_block(S7_SZL_WORK_MEMORY, 0)?;
+        let rec_len = szl.header.length_dr as usize;
+        let mut records = Vec::new();
+        let mut off = 0;
+        while off + rec_len <= szl.data.len() {
+            let rec = &szl.data[off..off + rec_len];
+            if rec.len() >= 12 {
+                records.push(WorkMemoryRecord {
+                    index:       make_u16!(rec[0], rec[1]),
+                    area_type:   make_u16!(rec[2], rec[3]),
+                    total_bytes: u32::from_be_bytes([rec[4], rec[5], rec[6], rec[7]]),
+                    used_bytes:  u32::from_be_bytes([rec[8], rec[9], rec[10], rec[11]]),
+                });
+            }
+            off += rec_len;
+        }
+        Ok(records)
+    }
+
+    /// ### Reads scan cycle time statistics from SZL `0x0194`.
+    ///
+    /// Returns a [`CycleTimeInfo`] with the OB1 execution count and the minimum,
+    /// maximum, and most-recent cycle times in milliseconds.
+    ///
+    /// ### Notes
+    /// The PLC must be in RUN mode for cycle time data to be meaningful. In STOP mode
+    /// all time fields may be zero.
+    ///
+    /// ### Errors
+    /// Same as [`read_szl`](S7Client::read_szl).
+    /// Returns `S7Error::IsoInvalidTelegram` if the SZL payload is shorter than 18 bytes.
+    ///
+    pub fn read_cycle_time(&mut self) -> Result<CycleTimeInfo, S7Error> {
+        let szl = self.read_szl_block(S7_SZL_CYCLE_TIME, 0)?;
+        if szl.data.len() < 18 {
+            return Err(S7Error::IsoInvalidTelegram);
+        }
+        let d = &szl.data;
+        Ok(CycleTimeInfo {
+            ob1_count:  u32::from_be_bytes([d[2], d[3], d[4], d[5]]),
+            min_ms:     u32::from_be_bytes([d[6],  d[7],  d[8],  d[9]])  as f64 / 10.0,
+            max_ms:     u32::from_be_bytes([d[10], d[11], d[12], d[13]]) as f64 / 10.0,
+            current_ms: u32::from_be_bytes([d[14], d[15], d[16], d[17]]) as f64 / 10.0,
+        })
     }
 }
 

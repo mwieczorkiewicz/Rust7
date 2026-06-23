@@ -6,10 +6,12 @@ mod diag_events;
 
 pub use client::{
     CpuInfo,
+    CycleTimeInfo,
     DiagnosticEntry,
     S7Client,
     S7DateTime,
     S7Error,
+    WorkMemoryRecord,
     // SZL types
     Szl,
     SzlHeader,
@@ -24,7 +26,9 @@ pub use client::{
     S7_SZL_CPU_ID,
     S7_SZL_CPU_INFO,
     S7_SZL_CPU_STATUS,
+    S7_SZL_CYCLE_TIME,
     S7_SZL_DIAG_BUFFER,
+    S7_SZL_WORK_MEMORY,
     S7_WL_BIT,
     S7_WL_BYTE,
 };
