@@ -253,7 +253,7 @@ Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>
 ### PR Checklist
 
 - [ ] `cargo build` passes
-- [ ] `cargo clippy` introduces no new warnings (6 pre-existing known warnings — do not add more)
+- [ ] `cargo clippy` is clean (0 warnings — keep it that way)
 - [ ] `cargo test` introduces no new doc-test failures (4 pre-existing)
 - [ ] `cargo doc --no-deps` generates cleanly
 - [ ] Any new `pub` item is re-exported from `src/lib.rs`
@@ -367,14 +367,7 @@ Connect 3000ms, Read 1000ms, Write 500ms. Managed switches with spanning-tree ma
 **Writing to `S7_AREA_PA`:**
 Lands in the output process image, but OB1 re-copies its own output assignments to the image at the end of each scan. Write is silently overwritten on the next cycle unless the output is unassigned in the PLC program.
 
-**Known clippy warnings (6 pre-existing):**
-1. `new_without_default` — `S7Client::new` should impl `Default`
-2. `manual_range_contains` — in `set_connection_type`
-3. `let_unit_value` × 2 — in `read_area` and `write_area`
-4. `doc_lazy_continuation` — in `write_area` doc comment
-5. `unnecessary_mut_passed` — in `write_bit`
-
-If fixing, fix all 6 in one commit.
+**Known clippy warnings:** none — `cargo clippy` is clean.
 
 ---
 
