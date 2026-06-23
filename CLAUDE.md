@@ -219,6 +219,33 @@ loop {
 
 `client.disconnect()` is idempotent and safe to call when already disconnected.
 
+### Commit Style
+
+Use [Conventional Commits](https://www.conventionalcommits.org/). Every commit must have a type prefix:
+
+| Prefix | When to use |
+|--------|-------------|
+| `feat:` | new user-visible feature or API |
+| `fix:` | bug fix |
+| `test:` | adding or updating tests |
+| `docs:` | CLAUDE.md, README, doc comments |
+| `refactor:` | internal restructure with no behaviour change |
+| `chore:` | dependency bumps, formatting, CI |
+| `ai:` | agentic scaffolding, prompts, agent config |
+
+**Subject line:** imperative mood, ≤72 chars. An em dash (`—`) may separate the what from the why in a single line when no body is needed (e.g. `docs: update CLAUDE.md — bare cargo test works`).
+
+**Body (optional):** blank line after subject, then explain *why* and *how*. Use a short bullet list when the commit touches multiple distinct things.
+
+**Co-authoring with Claude:** always append the trailer when Claude co-authors:
+```
+Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>
+```
+
+**Granularity:** one logical change per commit. A Cargo.toml dep addition and the tests that need it can go together; source changes and doc updates should be separate commits.
+
+---
+
 ### PR Checklist
 
 - [ ] `cargo build` passes
