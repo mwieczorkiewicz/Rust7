@@ -5,43 +5,32 @@ Pragmatic native Rust S7 client (Snap7‑style) for Siemens PLCs.
 ---
 
 ## Features
-- Pure Rust, no unsafe code.
-- Low latency: ≈ 1ms/PDU.
-- Small footprint.
-- Strict control of incoming headers.
-- Automatic telegram splitting for large reads/writes.
-- Connection helpers methods for S71200/1500 and S7300.
+- Pure Rust, zero unsafe code, zero external dependencies.
+- Low latency: ≈ 1 ms/PDU.
+- Automatic telegram splitting for reads/writes larger than the negotiated PDU size.
+- Connection helpers for S7-1200/1500, S7-300, and rack/slot-based PLCs.
+- SZL (System Status List) reads: raw `read_szl`, structured `read_cpu_info`, and `read_diagnostic_buffer`.
+- Diagnostic event ID lookup: `describe_event` maps any `event_id` to a human-readable class and name.
+
 ---
 
 ## Quick start
 ```rust
-use rust7::client::{S7Client};
+use rust7::{S7Client, S7Error};
 
-fn main() {
+fn main() -> Result<(), S7Error> {
     let mut client = S7Client::new();
-    let db_number: u16 = 100; // Must exist into the PLC
 
-    // Connection
-    match client.connect_s71200_1500("192.168.0.100") {
-        Ok(_) => { println!("Connected to PLC") },
-        Err(e) => {
-            eprintln!("Connection failed: {}", e);
-            return;
-        }
-    }
-    // Reads 64 byte from DB100
-    println!("");
-    println!("Attempt to read 64 byte from DB100");
-    let mut read_buffer = vec![0u8; 64];
-    match client.read_db(db_number, 0, &mut read_buffer) {
-        Ok(_) => {          
-            println!("Success!");
-            println!("Job time (ms) : {:.3}", client.last_time);
-        },
-        Err(e) => eprintln!("Read failed: {}", e),
-    }
+    client.connect_s71200_1500("192.168.0.100")?;
+    println!("Connected — PDU {} bytes", client.pdu_length);
+
+    // Read 64 bytes from DB100, starting at byte 0
+    let mut buf = vec![0u8; 64];
+    client.read_db(100, 0, &mut buf)?;
+    println!("Read {} bytes in {:.3} ms", buf.len(), client.last_time);
 
     client.disconnect();
+    Ok(())
 }
 ```
 

@@ -111,6 +111,14 @@ while !exit_request{
 |`write_db`      |Writes a block of byte to a specific Data Block (DB)  |
 |`write_bit`     |Writes a bit to a specific S7 memory area             |
 
+#### SZL / Diagnostics methods
+|Prototype|Behaviour|
+|---|---|
+|`read_szl`              |Reads a raw SZL (System Status List) block from the PLC  |
+|`read_diagnostic_buffer`|Reads and decodes the PLC diagnostic buffer               |
+|`read_cpu_info`         |Reads CPU component-identification strings                |
+|`describe_event`        |Maps a diagnostic event ID to a human-readable description|
+
 ## Connection setup methods
 ---
 
@@ -140,7 +148,7 @@ In this case, use `CT_OP` or `CT_S7`.
 `Ok(())` on success, or an `S7Error` on failure.
 
 #### Errors
-- `S7Error::InvalidFunParam`: Invalid parameter supplied to the function.
+- `S7Error::InvalidFunParameter`: Invalid parameter supplied to the function.
 
 #### Notes
 1. The client must not be connected (that is, call this method before connecting).
@@ -162,7 +170,7 @@ pub fn set_timeout(&mut self, co_timeout_ms: u64, rd_timeout_ms: u64, wr_timeout
 `Ok(())` on success, or an `S7Error` on failure.
 
 #### Errors
-- `S7Error::InvalidFunParam`: Invalid parameter supplied to the function.
+- `S7Error::InvalidFunParameter`: Invalid parameter supplied to the function.
 
 #### Notes
 1. Values must be > 0, otherwise they are ignored
@@ -176,16 +184,16 @@ pub fn set_connection_port(&mut self, port: u16)
 The default S7 Port is 102, but if you need NAT the addresses you can use this method to change the default value.
 
 #### Parameters
-- `connection_type`: Connection type.
- 
+- `port`: TCP port number (1–65535). Default is 102.
+
 #### Returns
 `Ok(())` on success, or an `S7Error` on failure.
 
 #### Errors
-- `S7Error::InvalidFunParam`: Invalid parameter supplied to the function.
+- `S7Error::InvalidFunParameter`: `port` was 0.
 
-### Notes
-1. Value must be > 0, otherwise it is ignored
+#### Notes
+1. Value must be > 0, otherwise it is rejected.
 2. The client must not be connected (that is, call this method before connecting).
 
 ---
@@ -309,7 +317,7 @@ For example, if you want to access bit `DBX 45.3`, the start value would be 45 *
 In case of a low-level error, it is **highly recommended** to disconnect and reconnect the Client (as WinCC or other SCADA do)
   
 ##### High level
-- `S7Error::NotFound`: The resource was not found (e.g. Inexistent DB).
+- `S7Error::S7NotFound`: The resource was not found (e.g. a Data Block that does not exist).
 - `S7Error::S7InvalidAddress`:
 1. Attempt to read beyond the limits.
 2. The DB is optimized.
@@ -364,7 +372,7 @@ For example, if you want to access bit `DBX 45.3`, the start value would be 45 *
 In case of a low-level error, it is **highly recommended** to disconnect and reconnect the Client (as WinCC or other SCADA do)
 
 ##### High level
-- `S7Error::NotFound`: The resource was not found (e.g. Inexistent DB).
+- `S7Error::S7NotFound`: The resource was not found (e.g. a Data Block that does not exist).
 - `S7Error::S7InvalidAddress`:
 1. Attempt to write beyond the limits.
 2. The DB is optimized.
@@ -442,7 +450,7 @@ pub fn read_bit(&mut self, area: u8, db_number: u16, byte_num: u16, bit_idx: u8)
  `Ok(<bool>)` or `Err(<S7Error>)`
 
 #### Errors
-- `S7Error::InvalidFunParam`: Invalid parameter supplied to the function.
+- `S7Error::InvalidFunParameter`: Invalid parameter supplied to the function.
 - Other reported by read_area()
 
  #### Suggestion
@@ -479,7 +487,7 @@ To write **1** into DB10.DBX71.4 use:
 `Ok(())` Operation succeeded.
 
 #### Errors
-- `S7Error::InvalidFunParam`: Invalid parameter supplied to the function.
+- `S7Error::InvalidFunParameter`: Invalid parameter supplied to the function.
 - Other reported by write_area()
 
 #### Notes
@@ -491,25 +499,190 @@ For further info, please refer to `write_area()`
 ---
 
 ```rust
+pub pdu_length: u16
+```
+#### PDU size negotiated with the PLC during connection setup.
+Typical value is 480 bytes. Larger values mean fewer round-trips for large reads/writes.
+
+---
+```rust
 pub connected: bool
 ```
-#### The Client is connected to the PLC
+#### `true` while a TCP connection to the PLC is active.
 #### Note
-- This is just a memory bit and doesn't reflect the actual state of the connection. For example, if you unplug the network cable, the underlying socket won't notice anything until the next read or write operation.
+- This is a cached flag, not a live network probe. If the cable is unplugged, `connected` stays `true` until the next read or write call fails.
 
 ---
 ```rust
 pub last_time: f64
 ```
-#### Last operation time (ms).
+#### Duration of the most recent operation in milliseconds.
 #### Note
-- If an error occurred the value will be 0.0
+- Set to `0.0` when an error occurs before the operation completes.
 
 ---
 ```rust
-pub chunks:  usize
+pub chunks: usize
 ```
-#### Indicates how many pieces the data to be read or written in the last operation was divided into
-Maybe you need to know it only for extreme tuning
+#### Number of PDU round-trips used by the most recent read or write.
+Values above 1 mean the data was split across multiple S7 PDUs (auto-chunking).
 #### Note
-- If an error occurred the value will be 0
+- Set to 0 when an error occurs.
+
+---
+# SZL / Diagnostics
+---
+
+SZL (System Status List / Systemzustandsliste) reads use the S7 Userdata protocol (ROSCTR `0x07`), a different path from normal data reads. Multi-fragment responses are handled automatically.
+
+## SZL constants
+
+| Constant | Value | Description |
+|---|---|---|
+| `S7_SZL_CPU_ID`     | `0x0011` | Module identification (order number, firmware version, PLC type) |
+| `S7_SZL_CPU_INFO`   | `0x001C` | Component identification (module name, serial number, AS name, copyright) |
+| `S7_SZL_DIAG_BUFFER`| `0x00A0` | Diagnostic buffer — the primary diagnostic facility accessible from outside the PLC |
+| `S7_SZL_CPU_STATUS` | `0x0424` | Current CPU operating mode (RUN / STOP / STARTUP) |
+
+## SZL types
+
+### `SzlHeader`
+
+```rust
+pub struct SzlHeader {
+    pub length_dr: u16,  // byte length of each data record
+    pub n_dr: u16,       // total number of data records (across all fragments)
+}
+```
+
+### `Szl`
+
+```rust
+pub struct Szl {
+    pub header: SzlHeader,
+    pub data: Vec<u8>,   // concatenated record bytes; length = header.length_dr * header.n_dr
+}
+```
+
+### `S7DateTime`
+
+Decoded Siemens `DATE_AND_TIME` (8-byte BCD timestamp, S7 type `DT`).
+
+```rust
+pub struct S7DateTime {
+    pub year: u16,        // full year (e.g. 2024); BCD 00–89 → 2000–2089, 90–99 → 1990–1999
+    pub month: u8,        // 1–12
+    pub day: u8,          // 1–31
+    pub hour: u8,         // 0–23
+    pub minute: u8,       // 0–59
+    pub second: u8,       // 0–59
+    pub millisecond: u16, // 0–999
+    pub weekday: u8,      // Siemens: 1 = Sunday … 7 = Saturday
+}
+```
+
+### `DiagnosticEntry`
+
+One entry from the PLC diagnostic buffer. Entries are returned newest-first.
+
+```rust
+pub struct DiagnosticEntry {
+    pub event_id: u16,              // raw event ID; pass to describe_event() for a friendly name
+    pub timestamp: Option<S7DateTime>, // None if any BCD nibble was invalid
+    pub info: [u8; 10],             // remaining event-specific bytes (not decoded by this library)
+}
+```
+
+### `CpuInfo`
+
+```rust
+pub struct CpuInfo {
+    pub module_type_name: String, // e.g. "CPU 1516-3 PN/DP"
+    pub module_name: String,      // user-assigned name from TIA Portal
+    pub as_name: String,          // automation station (project) name
+    pub copyright: String,        // Siemens copyright string from firmware
+    pub serial_number: String,    // unique hardware serial number
+}
+```
+
+### `DiagEventInfo`
+
+Returned by `describe_event()`.
+
+```rust
+pub struct DiagEventInfo {
+    pub class: &'static str,       // event class from the high nibble, e.g. "Mode transitions"
+    pub name: Option<&'static str>,// specific event name, or None if not in the lookup tables
+}
+```
+
+## SZL methods
+
+---
+```rust
+pub fn read_szl(&mut self, szl_id: u16, szl_index: u16) -> Result<Szl, S7Error>
+```
+#### Reads a raw SZL block from the PLC.
+
+#### Parameters
+- `szl_id`: SZL list identifier (e.g. `S7_SZL_DIAG_BUFFER`, `S7_SZL_CPU_INFO`).
+- `szl_index`: SZL index (use `0` for the complete list).
+
+#### Returns
+`Ok(Szl)` with raw record bytes and a parsed header.
+
+#### Errors
+- `S7Error::NotConnected`: client is not connected.
+- `S7Error::SzlReadFailed`: PLC returned a non-success data return code.
+- `S7Error::IsoInvalidTelegram`, `S7Error::IsoInvalidHeader`, `S7Error::IsoFragmentedPacket`: protocol errors.
+- `S7Error::Io`: network I/O error.
+
+---
+```rust
+pub fn read_diagnostic_buffer(&mut self) -> Result<Vec<DiagnosticEntry>, S7Error>
+```
+#### Reads and decodes the PLC diagnostic buffer (SZL `0x00A0`).
+
+Returns entries newest-first. Pass `entry.event_id` to `describe_event()` for a human-readable description.
+
+#### Returns
+`Ok(Vec<DiagnosticEntry>)` — may be empty if the buffer contains no entries.
+
+#### Errors
+Same as `read_szl()`.
+
+---
+```rust
+pub fn read_cpu_info(&mut self) -> Result<CpuInfo, S7Error>
+```
+#### Reads component-identification strings from SZL `0x001C`.
+
+#### Returns
+`Ok(CpuInfo)` with module type, name, AS name, copyright, and serial number.
+
+#### Errors
+Same as `read_szl()`.
+
+---
+## Diagnostic event ID lookup
+
+```rust
+pub fn describe_event(event_id: u16) -> DiagEventInfo
+```
+
+Maps a raw `event_id` from a `DiagnosticEntry` to a human-readable class and name.
+
+The lookup follows the same dispatch logic as the Wireshark S7Comm dissector:
+- The high nibble (bits 12–15) identifies the event class (e.g. `0x4` → "Mode transitions").
+- IDs with class `0x8` or `0x9` are looked up in the standardised diagnostic / predefined-user-event table; all others use the fixed-event table.
+- 557 entries are covered in total.
+
+#### Example
+
+```rust
+use rust7::{describe_event, S7Client};
+
+let info = describe_event(0x4302);
+println!("{}: {}", info.class, info.name.unwrap_or("(unknown)"));
+// Mode transitions: Mode transition from STARTUP to RUN
+```
